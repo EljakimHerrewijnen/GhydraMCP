@@ -325,6 +325,37 @@ Represents functions within the current program.
   ```
 - **`DELETE /functions/{address}`**: Delete the function definition at the specified address.
 
+- **`GET /functions/at?address={addr}`** and **`GET /functions/at/{addr}`**: Convenience look-up that returns the function that starts at or contains the given address. Useful when you only have an interior address (e.g., instruction site) and want the owning function.
+  ```json
+  // Example Response for GET /functions/at/0x401050
+  {
+    "id": "req-func-at",
+    "instance": "http://localhost:8192",
+    "success": true,
+    "result": {
+      "name": "main",
+      "address": "0x401000",
+      "signature": "int main(int argc, char** argv)",
+      "returnType": "int",
+      "callingConvention": "__cdecl",
+      "namespace": "Global",
+      "isExternal": false,
+      "parameters": [
+        { "name": "argc", "dataType": "int", "ordinal": 0, "storage": "stack" },
+        { "name": "argv", "dataType": "char **", "ordinal": 1, "storage": "stack" }
+      ]
+    },
+    "_links": {
+      "self": { "href": "/functions/at/0x401050" },
+      "by_address": { "href": "/functions/0x401000" },
+      "by_name": { "href": "/functions/by-name/main" },
+      "decompile": { "href": "/functions/0x401000/decompile" },
+      "disassembly": { "href": "/functions/0x401000/disassembly" },
+      "program": { "href": "/program" }
+    }
+  }
+  ```
+
 #### Function Sub-Resources
 
 - **`GET /functions/{address}/decompile`**: Get decompiled C-like code for the function.

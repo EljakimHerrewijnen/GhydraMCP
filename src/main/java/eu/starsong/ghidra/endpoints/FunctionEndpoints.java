@@ -59,6 +59,8 @@ public class FunctionEndpoints extends AbstractEndpoint {
         
         // Specifically handle sub-resource endpoints first (these are the most specific)
         server.createContext("/functions/by-name/", this::handleFunctionByName);
+    // Address-to-function resolution endpoint (path form)
+    server.createContext("/functions/at/", this::handleFunctionAtAddressPath);
         
         // Then handle address-based endpoints with clear pattern matching
         server.createContext("/functions/", this::handleFunctionByAddress);
@@ -76,6 +78,138 @@ public class FunctionEndpoints extends AbstractEndpoint {
     private void registerAdditionalEndpoints(HttpServer server) {
         // NOTE: The /function endpoint is already registered in ProgramEndpoints
         // We don't register it here to avoid duplicating functionality
+        // Query-parameter form for function-at-address
+        server.createContext("/functions/at", this::handleFunctionAtAddressQuery);
+    }
+
+    /**
+     * Helper to resolve a function for a given address (exact match preferred, else containing)
+     */
+    private Function getFunctionForAddress(Program program, Address addr) {
+        Function func = program.getFunctionManager().getFunctionAt(addr);
+        if (func == null) {
+            func = program.getFunctionManager().getFunctionContaining(addr);
+        }
+        return func;
+    }
+
+    /**
+     * GET /functions/at/{address} -> returns the function at/containing the address
+     */
+    private void handleFunctionAtAddressPath(HttpExchange exchange) throws IOException {
+        try {
+            if (!"GET".equals(exchange.getRequestMethod())) {
+                sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+                return;
+            }
+
+            Program program = getCurrentProgram();
+            if (program == null) {
+                sendErrorResponse(exchange, 503, "No program is currently loaded", "NO_PROGRAM_LOADED");
+                return;
+            }
+
+            String path = exchange.getRequestURI().getPath();
+            if (path.equals("/functions/at") || path.equals("/functions/at/")) {
+                handleFunctionAtAddressQuery(exchange);
+                return;
+            }
+
+            String addressStr = path.substring("/functions/at/".length());
+            // Strip any trailing resource segments if accidentally provided
+            int slash = addressStr.indexOf('/');
+            if (slash != -1) {
+                addressStr = addressStr.substring(0, slash);
+            }
+
+            Address address;
+            try {
+                address = program.getAddressFactory().getAddress(addressStr);
+            } catch (Exception e) {
+                sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_ADDRESS");
+                return;
+            }
+
+            Function func = getFunctionForAddress(program, address);
+            if (func == null) {
+                sendErrorResponse(exchange, 404, "No function contains address: " + addressStr, "FUNCTION_NOT_FOUND");
+                return;
+            }
+
+            FunctionInfo info = buildFunctionInfo(func);
+            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                .success(true)
+                .result(info)
+                .addLink("self", "/functions/at/" + addressStr)
+                .addLink("by_address", "/functions/" + func.getEntryPoint())
+                .addLink("by_name", "/functions/by-name/" + func.getName())
+                .addLink("decompile", "/functions/" + func.getEntryPoint() + "/decompile")
+                .addLink("disassembly", "/functions/" + func.getEntryPoint() + "/disassembly")
+                .addLink("program", "/program");
+
+            sendJsonResponse(exchange, builder.build(), 200);
+        } catch (Exception e) {
+            Msg.error(this, "Error handling /functions/at/{address}", e);
+            sendErrorResponse(exchange, 500, "Internal Server Error: " + e.getMessage(), "INTERNAL_ERROR");
+        }
+    }
+
+    /**
+     * GET /functions/at?address=... -> returns the function at/containing the address
+     */
+    private void handleFunctionAtAddressQuery(HttpExchange exchange) throws IOException {
+        try {
+            if (!"GET".equals(exchange.getRequestMethod())) {
+                sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+                return;
+            }
+
+            Program program = getCurrentProgram();
+            if (program == null) {
+                sendErrorResponse(exchange, 503, "No program is currently loaded", "NO_PROGRAM_LOADED");
+                return;
+            }
+
+            Map<String, String> params = parseQueryParams(exchange);
+            String addressStr = params.get("address");
+            if (addressStr == null || addressStr.isEmpty()) {
+                addressStr = params.get("addr");
+            }
+            if (addressStr == null || addressStr.isEmpty()) {
+                sendErrorResponse(exchange, 400, "Missing address parameter", "MISSING_PARAMETER");
+                return;
+            }
+
+            Address address;
+            try {
+                address = program.getAddressFactory().getAddress(addressStr);
+            } catch (Exception e) {
+                sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_ADDRESS");
+                return;
+            }
+
+            Function func = getFunctionForAddress(program, address);
+            if (func == null) {
+                sendErrorResponse(exchange, 404, "No function contains address: " + addressStr, "FUNCTION_NOT_FOUND");
+                return;
+            }
+
+            FunctionInfo info = buildFunctionInfo(func);
+            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                .success(true)
+                .result(info)
+                .addLink("self", "/functions/at?address=" + addressStr)
+                .addLink("by_address", "/functions/" + func.getEntryPoint())
+                .addLink("by_name", "/functions/by-name/" + func.getName())
+                .addLink("decompile", "/functions/" + func.getEntryPoint() + "/decompile")
+                .addLink("disassembly", "/functions/" + func.getEntryPoint() + "/disassembly")
+                .addLink("program", "/program");
+
+            sendJsonResponse(exchange, builder.build(), 200);
+        } catch (Exception e) {
+            Msg.error(this, "Error handling /functions/at?address=...", e);
+            sendErrorResponse(exchange, 500, "Internal Server Error: " + e.getMessage(), "INTERNAL_ERROR");
+        }
     }
     
     /**

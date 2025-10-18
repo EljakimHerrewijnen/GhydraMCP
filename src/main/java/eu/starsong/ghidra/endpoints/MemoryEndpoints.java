@@ -64,7 +64,8 @@ public class MemoryEndpoints extends AbstractEndpoint {
     
     private void handleMemoryRequest(HttpExchange exchange) throws IOException {
         try {
-            if ("GET".equals(exchange.getRequestMethod())) {
+            String method = exchange.getRequestMethod();
+            if ("GET".equals(method)) {
                 Map<String, String> qparams = parseQueryParams(exchange);
                 String addressStr = qparams.get("address");
                 String lengthStr = qparams.get("length");
@@ -180,6 +181,143 @@ public class MemoryEndpoints extends AbstractEndpoint {
                     sendErrorResponse(exchange, 404, "Cannot read memory at address: " + e.getMessage(), "MEMORY_ACCESS_ERROR");
                 }
                 
+            } else if ("PATCH".equals(method)) {
+                // Memory write operation
+                Map<String, String> qparams = parseQueryParams(exchange);
+                String addressStr = qparams.get("address");
+                if (addressStr == null || addressStr.isEmpty()) {
+                    // Allow address extracted earlier via path handler attribute
+                    Object addrAttr = exchange.getAttribute("address");
+                    if (addrAttr != null) {
+                        addressStr = addrAttr.toString();
+                    }
+                }
+                if (addressStr == null || addressStr.isEmpty()) {
+                    sendErrorResponse(exchange, 400, "Address parameter is required", "MISSING_PARAMETER");
+                    return;
+                }
+
+                Program program = getCurrentProgram();
+                if (program == null) {
+                    sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+                    return;
+                }
+
+                Address address;
+                try {
+                    address = program.getAddressFactory().getAddress(addressStr);
+                } catch (Exception e) {
+                    sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_ADDRESS");
+                    return;
+                }
+
+                // Parse JSON body
+                Map<String, String> payload = parseJsonPostParams(exchange);
+                String bytesData = payload.get("bytes");
+                String format = Optional.ofNullable(payload.get("format")).orElse("hex").toLowerCase();
+                boolean force = Boolean.parseBoolean(Optional.ofNullable(payload.get("force")).orElse("false"));
+                if (bytesData == null || bytesData.isEmpty()) {
+                    sendErrorResponse(exchange, 400, "'bytes' field required", "MISSING_PARAMETER");
+                    return;
+                }
+                if (!(format.equals("hex") || format.equals("base64") || format.equals("string"))) {
+                    sendErrorResponse(exchange, 400, "Invalid format (hex|base64|string)", "INVALID_PARAMETER");
+                    return;
+                }
+
+                byte[] decoded;
+                try {
+                    decoded = decodeBytes(bytesData, format);
+                } catch (IllegalArgumentException iae) {
+                    sendErrorResponse(exchange, 400, iae.getMessage(), "INVALID_PARAMETER");
+                    return;
+                }
+
+                if (decoded.length == 0) {
+                    sendErrorResponse(exchange, 400, "Decoded byte array empty", "INVALID_PARAMETER");
+                    return;
+                }
+                if (decoded.length > MAX_MEMORY_LENGTH) {
+                    sendErrorResponse(exchange, 400, "Write length exceeds max of " + MAX_MEMORY_LENGTH, "LIMIT_EXCEEDED");
+                    return;
+                }
+
+                Memory memory = program.getMemory();
+                if (!memory.contains(address)) {
+                    sendErrorResponse(exchange, 404, "Address not within any memory block", "MEMORY_ACCESS_ERROR");
+                    return;
+                }
+                ghidra.program.model.mem.MemoryBlock block = memory.getBlock(address);
+                if (block == null) {
+                    sendErrorResponse(exchange, 404, "No memory block for address", "MEMORY_BLOCK_NOT_FOUND");
+                    return;
+                }
+                if (!block.isWrite()) {
+                    sendErrorResponse(exchange, 403, "Memory block not writable: " + block.getName(), "MEMORY_BLOCK_NOT_WRITABLE");
+                    return;
+                }
+                // Prevent overflow outside block end
+                long remaining = block.getEnd().getOffset() - address.getOffset() + 1;
+                if (decoded.length > remaining) {
+                    sendErrorResponse(exchange, 400, "Write exceeds block boundary (remaining=" + remaining + ")", "WRITE_OUT_OF_RANGE");
+                    return;
+                }
+
+                // Perform write inside transaction
+                try {
+                    boolean success = TransactionHelper.executeInTransaction(program, force ? "Force Write Memory (clear code units)" : "Write Memory", () -> {
+                        if (force) {
+                            try {
+                                // Clear existing instructions/data in the target range to avoid conflicts
+                                Address end = address.add(decoded.length - 1);
+                                program.getListing().clearCodeUnits(address, end, false);
+                            } catch (Exception ce) {
+                                // Log but still attempt write; the write may still succeed
+                                Msg.warn(this, "Failed to clear code units before write: " + ce.getMessage());
+                            }
+                        }
+                        memory.setBytes(address, decoded);
+                        return true;
+                    });
+                    if (!success) {
+                        sendErrorResponse(exchange, 500, "Failed to write memory", "MEMORY_WRITE_FAILED");
+                        return;
+                    }
+                } catch (TransactionHelper.TransactionException tex) {
+                    Throwable cause = tex.getCause();
+                    String msg = tex.getMessage();
+                    if (cause != null && cause.getMessage() != null) {
+                        msg += ": " + cause.getMessage();
+                    }
+                    sendErrorResponse(exchange, 500, "Memory write transaction error: " + msg, "MEMORY_WRITE_FAILED");
+                    return;
+                } catch (Exception ex) {
+                    sendErrorResponse(exchange, 500, "Unexpected error writing memory: " + ex.getClass().getSimpleName() + ": " + ex.getMessage(), "MEMORY_WRITE_FAILED");
+                    return;
+                }
+
+                // Build response
+                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                        .success(true)
+                        .addLink("self", "/memory?address=" + address + "&length=" + decoded.length)
+                        .addLink("program", "/program")
+                        .addLink("blocks", "/memory/blocks");
+
+                // Add next/prev links like GET
+                builder.addLink("next", "/memory?address=" + address.add(decoded.length) + "&length=" + decoded.length);
+                if (address.getOffset() >= decoded.length) {
+                    builder.addLink("prev", "/memory?address=" + address.subtract(decoded.length) + "&length=" + decoded.length);
+                }
+
+                // Prepare result map
+                Map<String, Object> result = new HashMap<>();
+                result.put("address", address.toString());
+                result.put("bytesWritten", decoded.length);
+                result.put("format", format);
+                result.put("hexBytes", toHex(decoded));
+                result.put("rawBytes", Base64.getEncoder().encodeToString(decoded));
+                builder.result(result);
+                sendJsonResponse(exchange, builder.build(), 200);
             } else {
                 sendErrorResponse(exchange, 405, "Method Not Allowed");
             }
@@ -187,6 +325,51 @@ public class MemoryEndpoints extends AbstractEndpoint {
             Msg.error(this, "Error in /memory endpoint", e);
             sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage());
         }
+    }
+
+    private String toHex(byte[] data) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < data.length; i++) {
+            String h = Integer.toHexString(data[i] & 0xFF).toUpperCase();
+            if (h.length() == 1) sb.append('0');
+            sb.append(h);
+            if (i < data.length - 1) sb.append(' ');
+        }
+        return sb.toString();
+    }
+
+    private byte[] decodeBytes(String data, String format) {
+        switch (format) {
+            case "hex":
+                return parseHex(data);
+            case "base64":
+                try {
+                    return Base64.getDecoder().decode(data);
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("Invalid base64 data");
+                }
+            case "string":
+                return data.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            default:
+                throw new IllegalArgumentException("Unsupported format: " + format);
+        }
+    }
+
+    private byte[] parseHex(String hex) {
+        String cleaned = hex.replaceAll("[\n\r\t ]", "");
+        if (cleaned.length() % 2 != 0) {
+            throw new IllegalArgumentException("Hex string must have even length");
+        }
+        int len = cleaned.length();
+        byte[] out = new byte[len / 2];
+        for (int i = 0; i < len; i += 2) {
+            try {
+                out[i / 2] = (byte) Integer.parseInt(cleaned.substring(i, i + 2), 16);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("Invalid hex at position " + i);
+            }
+        }
+        return out;
     }
     
     /**
