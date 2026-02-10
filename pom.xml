@@ -310,7 +310,10 @@
             <executions>
               <execution>
                 <id>plugin-assembly</id>
-                <phase>none</phase>
+                <phase>package</phase>
+                <configuration>
+                  <attach>false</attach>
+                </configuration>
               </execution>
             </executions>
           </plugin>
