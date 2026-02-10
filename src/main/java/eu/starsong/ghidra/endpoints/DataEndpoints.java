@@ -3,6 +3,7 @@ package eu.starsong.ghidra.endpoints;
     import com.google.gson.JsonObject;
     import com.sun.net.httpserver.HttpExchange;
     import com.sun.net.httpserver.HttpServer;
+    import eu.starsong.ghidra.util.HttpUtil;
     import eu.starsong.ghidra.util.TransactionHelper;
     import eu.starsong.ghidra.util.TransactionHelper.TransactionException;
     import ghidra.program.model.address.Address;
@@ -44,58 +45,40 @@ package eu.starsong.ghidra.endpoints;
 
         @Override
         public void registerEndpoints(HttpServer server) {
-            server.createContext("/data", this::handleData);
-            server.createContext("/data/delete", exchange -> {
-                try {
-                    if ("POST".equals(exchange.getRequestMethod())) {
-                        Map<String, String> params = parseJsonPostParams(exchange);
-                        handleDeleteData(exchange, params);
-                    } else {
-                        sendErrorResponse(exchange, 405, "Method Not Allowed");
-                    }
-                } catch (Exception e) {
-                    Msg.error(this, "Error in /data/delete endpoint", e);
-                    sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage());
+            // Use safeHandler wrapper to catch StackOverflowError and other critical errors
+            // that can occur during data/symbol resolution in Ghidra
+            server.createContext("/data", HttpUtil.safeHandler(this::handleData, port));
+            server.createContext("/data/delete", HttpUtil.safeHandler(exchange -> {
+                if ("POST".equals(exchange.getRequestMethod())) {
+                    Map<String, String> params = parseJsonPostParams(exchange);
+                    handleDeleteData(exchange, params);
+                } else {
+                    sendErrorResponse(exchange, 405, "Method Not Allowed");
                 }
-            });
-            server.createContext("/data/update", exchange -> {
-                try {
-                    if ("POST".equals(exchange.getRequestMethod())) {
-                        Map<String, String> params = parseJsonPostParams(exchange);
-                        handleUpdateData(exchange, params);
-                    } else {
-                        sendErrorResponse(exchange, 405, "Method Not Allowed");
-                    }
-                } catch (Exception e) {
-                    Msg.error(this, "Error in /data/update endpoint", e);
-                    sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage());
+            }, port));
+            server.createContext("/data/update", HttpUtil.safeHandler(exchange -> {
+                if ("POST".equals(exchange.getRequestMethod())) {
+                    Map<String, String> params = parseJsonPostParams(exchange);
+                    handleUpdateData(exchange, params);
+                } else {
+                    sendErrorResponse(exchange, 405, "Method Not Allowed");
                 }
-            });
-            server.createContext("/data/type", exchange -> {
-                try {
-                    if ("POST".equals(exchange.getRequestMethod()) || "PATCH".equals(exchange.getRequestMethod())) {
-                        Map<String, String> params = parseJsonPostParams(exchange);
-                        handleTypeChangeData(exchange, params);
-                    } else {
-                        sendErrorResponse(exchange, 405, "Method Not Allowed");
-                    }
-                } catch (Exception e) {
-                    Msg.error(this, "Error in /data/type endpoint", e);
-                    sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage());
+            }, port));
+            server.createContext("/data/type", HttpUtil.safeHandler(exchange -> {
+                if ("POST".equals(exchange.getRequestMethod()) || "PATCH".equals(exchange.getRequestMethod())) {
+                    Map<String, String> params = parseJsonPostParams(exchange);
+                    handleTypeChangeData(exchange, params);
+                } else {
+                    sendErrorResponse(exchange, 405, "Method Not Allowed");
                 }
-            });
-            server.createContext("/strings", exchange -> {
-                try {
-                    if ("GET".equals(exchange.getRequestMethod())) {
-                        handleListStrings(exchange);
-                    } else {
-                        sendErrorResponse(exchange, 405, "Method Not Allowed");
-                    }
-                } catch (Exception e) {
-                    Msg.error(this, "Error in /strings endpoint", e);
-                    sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage());
+            }, port));
+            server.createContext("/strings", HttpUtil.safeHandler(exchange -> {
+                if ("GET".equals(exchange.getRequestMethod())) {
+                    handleListStrings(exchange);
+                } else {
+                    sendErrorResponse(exchange, 405, "Method Not Allowed");
                 }
-            });
+            }, port));
         }
 
         public void handleData(HttpExchange exchange) throws IOException {
@@ -1337,57 +1320,54 @@ package eu.starsong.ghidra.endpoints;
                 }
                 
                 List<Map<String, Object>> strings = new ArrayList<>();
-                
+
                 for (MemoryBlock block : program.getMemory().getBlocks()) {
                     if (!block.isInitialized()) continue;
-                    
+
                     DataIterator it = program.getListing().getDefinedData(block.getStart(), true);
                     while (it.hasNext()) {
                         Data data = it.next();
                         if (!block.contains(data.getAddress())) continue;
-                        
+
                         // Check if the data type is a string type
                         String dataTypeName = data.getDataType().getName().toLowerCase();
-                        boolean isString = dataTypeName.contains("string") || 
-                                          dataTypeName.contains("unicode") || 
+                        boolean isString = dataTypeName.contains("string") ||
+                                          dataTypeName.contains("unicode") ||
                                           (dataTypeName.contains("char") && data.getLength() > 1); // Array of chars
-                        
+
                         if (isString) {
-                            // Get the string value
                             String value = data.getDefaultValueRepresentation();
                             if (value == null) value = "";
-                            
-                            // Skip if it doesn't match the filter
+
                             if (filter != null && !filter.isEmpty() && !value.toLowerCase().contains(filter.toLowerCase())) {
                                 continue;
                             }
-                            
+
                             Map<String, Object> stringInfo = new HashMap<>();
                             stringInfo.put("address", data.getAddress().toString());
                             stringInfo.put("value", value);
                             stringInfo.put("length", data.getLength());
                             stringInfo.put("type", data.getDataType().getName());
-                            
-                            // If the data has a label/name, include it
+
                             String name = null;
                             Symbol symbol = program.getSymbolTable().getPrimarySymbol(data.getAddress());
                             if (symbol != null) {
-                                name = symbol.getName();
+                                name = safeGetSymbolName(symbol, program);
                             }
                             stringInfo.put("name", name != null ? name : "");
-                            
+
                             // Add HATEOAS links
                             Map<String, Object> links = new HashMap<>();
                             Map<String, String> selfLink = new HashMap<>();
                             selfLink.put("href", "/data/" + data.getAddress().toString());
                             links.put("self", selfLink);
-                            
+
                             Map<String, String> memoryLink = new HashMap<>();
                             memoryLink.put("href", "/memory?address=" + data.getAddress().toString());
                             links.put("memory", memoryLink);
-                            
+
                             stringInfo.put("_links", links);
-                            
+
                             strings.add(stringInfo);
                         }
                     }
