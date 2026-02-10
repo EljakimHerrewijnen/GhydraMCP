@@ -60,12 +60,10 @@ public class FunctionEndpoints extends AbstractEndpoint {
         // Use safeHandler wrapper to catch StackOverflowError and other critical errors
 
         // Specifically handle sub-resource endpoints first (these are the most specific)
-        server.createContext("/functions/by-name/", this::handleFunctionByName);
+        server.createContext("/functions/by-name/", HttpUtil.safeHandler(this::handleFunctionByName, port));
 
         // Address-to-function resolution endpoint (path form)
-        server.createContext("/functions/at/", this::handleFunctionAtAddressPath);
-
-        server.createContext("/functions/by-name/", HttpUtil.safeHandler(this::handleFunctionByName, port));
+        server.createContext("/functions/at/", HttpUtil.safeHandler(this::handleFunctionAtAddressPath, port));
 
         // Then handle address-based endpoints with clear pattern matching
         server.createContext("/functions/", HttpUtil.safeHandler(this::handleFunctionByAddress, port));
@@ -76,6 +74,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         // Register function-specific endpoints
         registerAdditionalEndpoints(server);
     }
+
 
     /**
      * Register additional convenience endpoints
