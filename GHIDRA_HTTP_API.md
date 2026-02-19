@@ -656,6 +656,73 @@ Provides raw memory access.
   ```
 - **`PATCH /memory/{address}`**: Write bytes to memory. Requires `bytes` (in specified `format`) and `format` in the payload. Use with extreme caution.
 
+- **`POST /memory/{address}/background-color`** (or **`PATCH`**): Set a background color for a specific address.
+  - Request Payload:
+    - `color` (required): Color value in one of these formats: `#RRGGBB`, `RRGGBB`, `#AARRGGBB`, `AARRGGBB`, a `java.awt.Color` constant (e.g. `YELLOW`), or a fully-qualified color constant (e.g. `java.awt.Color.YELLOW`).
+  ```json
+  // Example Request
+  {
+    "color": "#FFF59D"
+  }
+
+  // Example Response
+  {
+    "success": true,
+    "result": {
+      "address": "0x401000",
+      "color": "#FFF59D",
+      "alpha": 255
+    },
+    "_links": {
+      "self": { "href": "/memory/0x401000/background-color" },
+      "clearAll": { "href": "/memory/background-colors" }
+    }
+  }
+  ```
+
+- **`DELETE /memory/{address}/background-color`**: Remove the background color at one address.
+
+- **`POST /memory/background-colors`** (or **`PATCH`**): Set the same background color for multiple addresses.
+  - Request Payload:
+    - `addresses` (required): Array of addresses (`["0x401000", "0x401010"]`) or numeric values (`[4198400, 4198416]`).
+    - `color` (required): Same formats as above.
+  ```json
+  // Example Request
+  {
+    "addresses": ["0x401000", "0x401010", "0x401020"],
+    "color": "java.awt.Color.YELLOW"
+  }
+
+  // Example Response
+  {
+    "success": true,
+    "result": {
+      "addresses": ["0x401000", "0x401010", "0x401020"],
+      "count": 3,
+      "color": "#FFFF00",
+      "alpha": 255
+    },
+    "_links": {
+      "self": { "href": "/memory/background-colors" }
+    }
+  }
+  ```
+
+- **`DELETE /memory/background-colors`**: Remove all background colors in the current program.
+  ```json
+  // Example Response
+  {
+    "success": true,
+    "result": {
+      "cleared": true,
+      "scope": "all"
+    },
+    "_links": {
+      "self": { "href": "/memory/background-colors" }
+    }
+  }
+  ```
+
 ### 9. Cross-References (XRefs)
 
 Provides information about references to/from addresses.

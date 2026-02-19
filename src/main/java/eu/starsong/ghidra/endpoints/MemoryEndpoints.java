@@ -1,24 +1,30 @@
 package eu.starsong.ghidra.endpoints;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import eu.starsong.ghidra.api.ResponseBuilder;
 import eu.starsong.ghidra.util.TransactionHelper;
+import ghidra.app.plugin.core.colorizer.ColorizingService;
+import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressFactory;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
-import ghidra.program.model.listing.CodeUnit;
 import ghidra.program.model.listing.CommentType;
 import ghidra.program.model.listing.Program;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.util.Msg;
 
 import java.io.IOException;
+import java.awt.Color;
+import java.lang.reflect.Field;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
+import javax.swing.SwingUtilities;
 
 public class MemoryEndpoints extends AbstractEndpoint {
 
@@ -51,6 +57,8 @@ public class MemoryEndpoints extends AbstractEndpoint {
             String path = exchange.getRequestURI().getPath();
             if (path.contains("/comments/")) {
                 handleMemoryAddressRequest(exchange);
+            } else if (path.equals("/memory/background-colors")) {
+                handleBackgroundColorsRequest(exchange);
             } else if (path.equals("/memory/blocks")) {
                 handleMemoryBlocksRequest(exchange);
             } else {
@@ -406,6 +414,13 @@ private void handleMemoryAddressRequest(HttpExchange exchange) throws IOExceptio
             return;
         }
 
+        // Check if this is a request for a specific address background color
+        if (remainingPath.contains("/background-color")) {
+            String addressStr = remainingPath.split("/background-color", 2)[0];
+            handleAddressBackgroundColor(exchange, addressStr);
+            return;
+        }
+
         // Check if this is a disassembly request
         if (remainingPath.contains("/disassembly")) {
             String addressStr = remainingPath.split("/disassembly")[0];
@@ -427,6 +442,442 @@ private void handleMemoryAddressRequest(HttpExchange exchange) throws IOExceptio
         Msg.error(this, "Error handling memory address endpoint", e);
         sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR");
     }
+}
+
+/**
+ * Handle setting/clearing background color at a specific memory address.
+ * Endpoint: /memory/{address}/background-color
+ */
+private void handleAddressBackgroundColor(HttpExchange exchange, String addressStr) throws IOException {
+    try {
+        String method = exchange.getRequestMethod();
+        Program program = getCurrentProgram();
+
+        if (program == null) {
+            sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+            return;
+        }
+
+        Address address;
+        try {
+            address = program.getAddressFactory().getAddress(addressStr);
+        } catch (Exception e) {
+            sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_ADDRESS");
+            return;
+        }
+
+        if (!program.getMemory().contains(address)) {
+            sendErrorResponse(exchange, 404, "Address not within any memory block", "MEMORY_ACCESS_ERROR");
+            return;
+        }
+
+        ColorizingService colorService = getColorizingService();
+        if (colorService == null) {
+            sendErrorResponse(exchange, 503, "Colorizing service not available", "SERVICE_UNAVAILABLE");
+            return;
+        }
+
+        if ("POST".equals(method) || "PATCH".equals(method)) {
+            Map<String, String> payload = parseJsonPostParams(exchange);
+            String colorValue = payload.get("color");
+            if (colorValue == null || colorValue.trim().isEmpty()) {
+                sendErrorResponse(exchange, 400, "'color' field required", "MISSING_PARAMETER");
+                return;
+            }
+
+            Color color = parseColorValue(colorValue);
+            if (color == null) {
+                sendErrorResponse(exchange, 400,
+                    "Invalid color. Use #RRGGBB, #AARRGGBB, RRGGBB, AARRGGBB, or java.awt.Color name",
+                    "INVALID_PARAMETER");
+                return;
+            }
+
+            try {
+                final Address targetAddress = address;
+                final Color targetColor = color;
+                final ColorizingService targetService = colorService;
+                boolean success = executeOnEdtInTransaction(program,
+                    "Set background color at " + targetAddress,
+                    () -> setBackgroundColor(targetService, targetAddress, targetColor));
+
+                if (!success) {
+                    sendErrorResponse(exchange, 500, "Failed to set background color", "BACKGROUND_COLOR_SET_FAILED");
+                    return;
+                }
+            } catch (Exception e) {
+                sendErrorResponse(exchange, 500, "Failed to set background color: " + e.getMessage(),
+                    "BACKGROUND_COLOR_SET_FAILED");
+                return;
+            }
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("address", address.toString());
+            result.put("color", String.format("#%02X%02X%02X", color.getRed(), color.getGreen(), color.getBlue()));
+            result.put("alpha", color.getAlpha());
+
+            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                .success(true)
+                .result(result)
+                .addLink("self", "/memory/" + addressStr + "/background-color")
+                .addLink("clearAll", "/memory/background-colors");
+
+            sendJsonResponse(exchange, builder.build(), 200);
+            return;
+        }
+
+        if ("DELETE".equals(method)) {
+            try {
+                final Address targetAddress = address;
+                final ColorizingService targetService = colorService;
+                boolean success = executeOnEdtInTransaction(program,
+                    "Clear background color at " + targetAddress,
+                    () -> clearBackgroundColorAtAddress(targetService, targetAddress));
+
+                if (!success) {
+                    sendErrorResponse(exchange, 500, "Failed to clear background color", "BACKGROUND_COLOR_CLEAR_FAILED");
+                    return;
+                }
+            } catch (Exception e) {
+                sendErrorResponse(exchange, 500, "Failed to clear background color: " + e.getMessage(),
+                    "BACKGROUND_COLOR_CLEAR_FAILED");
+                return;
+            }
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("address", address.toString());
+            result.put("cleared", true);
+
+            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                .success(true)
+                .result(result)
+                .addLink("self", "/memory/" + addressStr + "/background-color")
+                .addLink("clearAll", "/memory/background-colors");
+
+            sendJsonResponse(exchange, builder.build(), 200);
+            return;
+        }
+
+        sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+    } catch (Exception e) {
+        Msg.error(this, "Error handling memory background color endpoint", e);
+        sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR");
+    }
+}
+
+/**
+ * Handle setting background colors for multiple addresses and removing all background colors.
+ * Endpoint: /memory/background-colors
+ */
+private void handleBackgroundColorsRequest(HttpExchange exchange) throws IOException {
+    try {
+        String method = exchange.getRequestMethod();
+        if (!("POST".equals(method) || "PATCH".equals(method) || "DELETE".equals(method))) {
+            sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+            return;
+        }
+
+        Program program = getCurrentProgram();
+        if (program == null) {
+            sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+            return;
+        }
+
+        ColorizingService colorService = getColorizingService();
+        if (colorService == null) {
+            sendErrorResponse(exchange, 503, "Colorizing service not available", "SERVICE_UNAVAILABLE");
+            return;
+        }
+
+        if ("POST".equals(method) || "PATCH".equals(method)) {
+            Map<String, String> payload = parseJsonPostParams(exchange);
+            String colorValue = payload.get("color");
+            String addressesRaw = payload.get("addresses");
+
+            if (colorValue == null || colorValue.trim().isEmpty()) {
+                sendErrorResponse(exchange, 400, "'color' field required", "MISSING_PARAMETER");
+                return;
+            }
+            if (addressesRaw == null || addressesRaw.trim().isEmpty()) {
+                sendErrorResponse(exchange, 400, "'addresses' field required", "MISSING_PARAMETER");
+                return;
+            }
+
+            Color color = parseColorValue(colorValue);
+            if (color == null) {
+                sendErrorResponse(exchange, 400,
+                    "Invalid color. Use #RRGGBB, #AARRGGBB, RRGGBB, AARRGGBB, or java.awt.Color name",
+                    "INVALID_PARAMETER");
+                return;
+            }
+
+            List<String> addressInputs;
+            try {
+                addressInputs = parseAddressInputs(addressesRaw);
+            } catch (IllegalArgumentException ex) {
+                sendErrorResponse(exchange, 400, ex.getMessage(), "INVALID_PARAMETER");
+                return;
+            }
+
+            if (addressInputs.isEmpty()) {
+                sendErrorResponse(exchange, 400, "'addresses' must contain at least one address", "INVALID_PARAMETER");
+                return;
+            }
+
+            List<String> normalizedAddresses = new ArrayList<>();
+            AddressSet addressSet = new AddressSet();
+            for (String input : addressInputs) {
+                Address parsed;
+                try {
+                    parsed = program.getAddressFactory().getAddress(input);
+                } catch (Exception e) {
+                    sendErrorResponse(exchange, 400, "Invalid address format: " + input, "INVALID_ADDRESS");
+                    return;
+                }
+
+                if (!program.getMemory().contains(parsed)) {
+                    sendErrorResponse(exchange, 404, "Address not within any memory block: " + parsed, "MEMORY_ACCESS_ERROR");
+                    return;
+                }
+
+                normalizedAddresses.add(parsed.toString());
+                addressSet.add(parsed);
+            }
+
+            try {
+                final ColorizingService typedService = colorService;
+                final Color targetColor = color;
+                final AddressSet targetSet = addressSet;
+                boolean success = executeOnEdtInTransaction(program,
+                    "Set background colors",
+                    () -> setBackgroundColor(typedService, targetSet, targetColor));
+                if (!success) {
+                    sendErrorResponse(exchange, 500, "Failed to set background colors", "BACKGROUND_COLOR_SET_FAILED");
+                    return;
+                }
+            } catch (Exception e) {
+                sendErrorResponse(exchange, 500, "Failed to set background colors: " + e.getMessage(),
+                    "BACKGROUND_COLOR_SET_FAILED");
+                return;
+            }
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("addresses", normalizedAddresses);
+            result.put("count", normalizedAddresses.size());
+            result.put("color", String.format("#%02X%02X%02X", color.getRed(), color.getGreen(), color.getBlue()));
+            result.put("alpha", color.getAlpha());
+
+            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                .success(true)
+                .result(result)
+                .addLink("self", "/memory/background-colors");
+
+            sendJsonResponse(exchange, builder.build(), 200);
+            return;
+        }
+
+        try {
+            final ColorizingService targetService = colorService;
+            boolean success = executeOnEdtInTransaction(program,
+                "Clear all background colors",
+                () -> clearAllBackgroundColors(targetService, program));
+
+            if (!success) {
+                sendErrorResponse(exchange, 500, "Failed to clear all background colors", "BACKGROUND_COLOR_CLEAR_FAILED");
+                return;
+            }
+        } catch (Exception e) {
+            sendErrorResponse(exchange, 500, "Failed to clear all background colors: " + e.getMessage(),
+                "BACKGROUND_COLOR_CLEAR_FAILED");
+            return;
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("cleared", true);
+        result.put("scope", "all");
+
+        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            .success(true)
+            .result(result)
+            .addLink("self", "/memory/background-colors");
+
+        sendJsonResponse(exchange, builder.build(), 200);
+    } catch (Exception e) {
+        Msg.error(this, "Error handling clear all background colors endpoint", e);
+        sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR");
+    }
+}
+
+private ColorizingService getColorizingService() {
+    PluginTool currentTool = getTool();
+    if (currentTool == null) {
+        return null;
+    }
+
+    try {
+        return currentTool.getService(ColorizingService.class);
+    } catch (Exception e) {
+        Msg.debug(this, "Error resolving ColorizingService: " + e.getMessage());
+        return null;
+    }
+}
+
+private boolean setBackgroundColor(ColorizingService colorService, Address address, Color color) {
+    AddressSet set = new AddressSet(address, address);
+    return setBackgroundColor(colorService, set, color);
+}
+
+private boolean setBackgroundColor(ColorizingService colorService, AddressSetView set, Color color) {
+    if (set == null || set.isEmpty()) {
+        throw new IllegalArgumentException("Address set is empty");
+    }
+    colorService.setBackgroundColor(set, color);
+    return true;
+}
+
+private boolean clearBackgroundColorAtAddress(ColorizingService colorService, Address address) {
+    colorService.clearBackgroundColor(address, address);
+    return true;
+}
+
+private boolean clearAllBackgroundColors(ColorizingService colorService, Program program) {
+    colorService.clearAllBackgroundColors();
+    return true;
+}
+
+@FunctionalInterface
+private interface EdtSupplier<T> {
+    T get() throws Exception;
+}
+
+private <T> T executeOnEdt(EdtSupplier<T> operation) throws Exception {
+    if (SwingUtilities.isEventDispatchThread()) {
+        return operation.get();
+    }
+
+    AtomicReference<T> result = new AtomicReference<>();
+    AtomicReference<Exception> error = new AtomicReference<>();
+
+    SwingUtilities.invokeAndWait(() -> {
+        try {
+            result.set(operation.get());
+        } catch (Exception e) {
+            error.set(e);
+        }
+    });
+
+    if (error.get() != null) {
+        throw error.get();
+    }
+
+    return result.get();
+}
+
+private <T> T executeOnEdtInTransaction(Program program, String transactionName, EdtSupplier<T> operation)
+        throws Exception {
+    return executeOnEdt(() -> {
+        int txId = program.startTransaction(transactionName);
+        if (txId < 0) {
+            throw new IllegalStateException("Failed to start transaction: " + transactionName);
+        }
+
+        boolean commit = false;
+        try {
+            T result = operation.get();
+            commit = true;
+            return result;
+        } finally {
+            program.endTransaction(txId, commit);
+        }
+    });
+}
+
+private List<String> parseAddressInputs(String addressesRaw) {
+    try {
+        JsonElement parsed = gson.fromJson(addressesRaw, JsonElement.class);
+        List<String> out = new ArrayList<>();
+
+        if (parsed == null || parsed.isJsonNull()) {
+            return out;
+        }
+
+        if (parsed.isJsonArray()) {
+            JsonArray arr = parsed.getAsJsonArray();
+            for (JsonElement el : arr) {
+                if (el == null || el.isJsonNull()) {
+                    continue;
+                }
+                if (el.isJsonPrimitive() && el.getAsJsonPrimitive().isString()) {
+                    out.add(el.getAsString().trim());
+                } else if (el.isJsonPrimitive() && el.getAsJsonPrimitive().isNumber()) {
+                    out.add("0x" + Long.toHexString(el.getAsLong()));
+                } else {
+                    throw new IllegalArgumentException("'addresses' must contain only string or numeric addresses");
+                }
+            }
+            return out;
+        }
+
+        // Fallback: single value provided
+        if (parsed.isJsonPrimitive() && parsed.getAsJsonPrimitive().isString()) {
+            out.add(parsed.getAsString().trim());
+            return out;
+        }
+        if (parsed.isJsonPrimitive() && parsed.getAsJsonPrimitive().isNumber()) {
+            out.add("0x" + Long.toHexString(parsed.getAsLong()));
+            return out;
+        }
+
+        throw new IllegalArgumentException("'addresses' must be an array of addresses");
+    } catch (IllegalArgumentException e) {
+        throw e;
+    } catch (Exception e) {
+        throw new IllegalArgumentException("Invalid 'addresses' payload: expected JSON array");
+    }
+}
+
+private Color parseColorValue(String colorValue) {
+    String value = colorValue.trim();
+
+    String lower = value.toLowerCase(Locale.ROOT);
+    if (lower.startsWith("java.awt.color.")) {
+        value = value.substring("java.awt.Color.".length());
+    }
+    else if (lower.startsWith("color.")) {
+        value = value.substring("Color.".length());
+    }
+
+    // Named java.awt.Color constants (e.g. red, BLUE)
+    try {
+        Field field = Color.class.getField(value.toUpperCase(Locale.ROOT));
+        if (Color.class.isAssignableFrom(field.getType())) {
+            return (Color) field.get(null);
+        }
+    } catch (Exception ignored) {
+        // Continue with hex parsing
+    }
+
+    if (value.startsWith("#")) {
+        value = value.substring(1);
+    }
+
+    // RRGGBB
+    if (value.matches("(?i)^[0-9a-f]{6}$")) {
+        int rgb = Integer.parseInt(value, 16);
+        return new Color(rgb);
+    }
+
+    // AARRGGBB
+    if (value.matches("(?i)^[0-9a-f]{8}$")) {
+        long argb = Long.parseLong(value, 16);
+        int a = (int) ((argb >> 24) & 0xFF);
+        int r = (int) ((argb >> 16) & 0xFF);
+        int g = (int) ((argb >> 8) & 0xFF);
+        int b = (int) (argb & 0xFF);
+        return new Color(r, g, b, a);
+    }
+
+    return null;
 }
 
 /**
