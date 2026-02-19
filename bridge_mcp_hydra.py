@@ -54,7 +54,7 @@ The API is organized into namespaces for different types of operations:
 - analysis_* : For program analysis
 """
 
-mcp = FastMCP("GhydraMCP", version=BRIDGE_VERSION, instructions=instructions)
+mcp = FastMCP("GhydraMCP", instructions=instructions)
 
 ghidra_host = os.environ.get("GHIDRA_HYDRA_HOST", DEFAULT_GHIDRA_HOST)
 
@@ -399,7 +399,9 @@ def register_instance(port: int, url: str = None) -> str:
                             print(error_msg, file=sys.stderr)
                             return error_msg
                         
-                        print(f"Connected to Ghidra plugin version {plugin_version} with API version {api_version}")
+                        print(f"Connected to Ghidra plugin version {plugin_version} with API version {api_version} ")
+                        print(project_info)
+                        
             except Exception as e:
                 print(f"Error parsing plugin version: {e}", file=sys.stderr)
             
