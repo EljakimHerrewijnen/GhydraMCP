@@ -636,10 +636,30 @@ Provides functionality for listing and creating custom data types managed by Ghi
 
 - **`GET /datatypes`**: List data types. Supports pagination and filtering.
   - Query Parameters:
+    - `?name=[full_name]`: Return a single data type by exact name match.
     - `?offset=[int]`: Number of data types to skip (default: 0).
     - `?limit=[int]`: Maximum number of data types to return (default: 100).
     - `?category=[string]`: Filter by category path substring (e.g. `/winapi`).
     - `?kind=[struct|enum|union]`: Filter by data type kind.
+
+  When `name` is provided, the response `result` is a single object instead of a paginated list.
+
+  ```json
+  // Example Response for GET /datatypes?name=MyStruct
+  "result": {
+    "name": "MyStruct",
+    "displayName": "MyStruct",
+    "category": "/custom",
+    "length": 16,
+    "kind": "struct",
+    "numComponents": 4
+  },
+  "_links": {
+    "self": { "href": "/datatypes?name=MyStruct" },
+    "datatypes": { "href": "/datatypes" }
+  }
+  ```
+
   ```json
   // Example Response
   "result": [

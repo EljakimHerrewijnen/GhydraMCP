@@ -63,8 +63,31 @@ public class DataTypeEndpoints extends AbstractEndpoint {
             int limit = parseIntOrDefault(params.get("limit"), 100);
             String category = params.get("category");
             String kind = params.get("kind"); // struct, enum, union
+            String name = params.get("name");
 
             DataTypeManager dtm = program.getDataTypeManager();
+
+            if (name != null && !name.isEmpty()) {
+                DataType found = findDataTypeByName(dtm, name, category, kind);
+                if (found == null) {
+                    sendErrorResponse(exchange, 404, "Data type not found: " + name, "RESOURCE_NOT_FOUND");
+                    return;
+                }
+
+                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                        .success(true)
+                        .result(toDataTypeInfo(found));
+
+                builder.addLink("self", "/datatypes?name=" + name);
+                builder.addLink("datatypes", "/datatypes");
+                builder.addLink("create_struct", "/datatypes/struct", "POST");
+                builder.addLink("create_enum", "/datatypes/enum", "POST");
+                builder.addLink("create_union", "/datatypes/union", "POST");
+
+                sendJsonResponse(exchange, builder.build(), 200);
+                return;
+            }
+
             List<Map<String, Object>> dataTypes = new ArrayList<>();
 
             // Iterate through all data types
@@ -73,39 +96,11 @@ public class DataTypeEndpoints extends AbstractEndpoint {
                 DataType dt = iterator.next();
 
                 // Apply filters
-                if (category != null && !dt.getCategoryPath().getPath().contains(category)) {
+                if (!matchesFilters(dt, category, kind)) {
                     continue;
                 }
 
-                if (kind != null) {
-                    boolean match = false;
-                    if (kind.equals("struct") && dt instanceof Structure) match = true;
-                    if (kind.equals("enum") && dt instanceof ghidra.program.model.data.Enum) match = true;
-                    if (kind.equals("union") && dt instanceof Union) match = true;
-                    if (!match) continue;
-                }
-
-                Map<String, Object> dtInfo = new HashMap<>();
-                dtInfo.put("name", dt.getName());
-                dtInfo.put("displayName", dt.getDisplayName());
-                dtInfo.put("category", dt.getCategoryPath().getPath());
-                dtInfo.put("length", dt.getLength());
-
-                // Add type-specific information
-                if (dt instanceof Structure) {
-                    dtInfo.put("kind", "struct");
-                    dtInfo.put("numComponents", ((Structure) dt).getNumComponents());
-                } else if (dt instanceof ghidra.program.model.data.Enum) {
-                    dtInfo.put("kind", "enum");
-                    dtInfo.put("numValues", ((ghidra.program.model.data.Enum) dt).getCount());
-                } else if (dt instanceof Union) {
-                    dtInfo.put("kind", "union");
-                    dtInfo.put("numComponents", ((Union) dt).getNumComponents());
-                } else {
-                    dtInfo.put("kind", "other");
-                }
-
-                dataTypes.add(dtInfo);
+                dataTypes.add(toDataTypeInfo(dt));
             }
 
             // Build response
@@ -129,6 +124,58 @@ public class DataTypeEndpoints extends AbstractEndpoint {
             Msg.error(this, "Error in /datatypes endpoint", e);
             sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage());
         }
+    }
+
+    private DataType findDataTypeByName(DataTypeManager dtm, String name, String category, String kind) {
+        Iterator<DataType> iterator = dtm.getAllDataTypes();
+        while (iterator.hasNext()) {
+            DataType dt = iterator.next();
+            if (!name.equals(dt.getName())) {
+                continue;
+            }
+            if (!matchesFilters(dt, category, kind)) {
+                continue;
+            }
+            return dt;
+        }
+        return null;
+    }
+
+    private boolean matchesFilters(DataType dt, String category, String kind) {
+        if (category != null && !dt.getCategoryPath().getPath().contains(category)) {
+            return false;
+        }
+
+        if (kind == null) {
+            return true;
+        }
+
+        return ("struct".equals(kind) && dt instanceof Structure)
+                || ("enum".equals(kind) && dt instanceof ghidra.program.model.data.Enum)
+                || ("union".equals(kind) && dt instanceof Union);
+    }
+
+    private Map<String, Object> toDataTypeInfo(DataType dt) {
+        Map<String, Object> dtInfo = new HashMap<>();
+        dtInfo.put("name", dt.getName());
+        dtInfo.put("displayName", dt.getDisplayName());
+        dtInfo.put("category", dt.getCategoryPath().getPath());
+        dtInfo.put("length", dt.getLength());
+
+        if (dt instanceof Structure) {
+            dtInfo.put("kind", "struct");
+            dtInfo.put("numComponents", ((Structure) dt).getNumComponents());
+        } else if (dt instanceof ghidra.program.model.data.Enum) {
+            dtInfo.put("kind", "enum");
+            dtInfo.put("numValues", ((ghidra.program.model.data.Enum) dt).getCount());
+        } else if (dt instanceof Union) {
+            dtInfo.put("kind", "union");
+            dtInfo.put("numComponents", ((Union) dt).getNumComponents());
+        } else {
+            dtInfo.put("kind", "other");
+        }
+
+        return dtInfo;
     }
 
     /**
