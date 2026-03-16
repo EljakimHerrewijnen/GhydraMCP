@@ -630,16 +630,130 @@ Provides functionality for creating and managing struct (composite) data types.
   }
   ```
 
+### 6.3 Data Types
+
+Provides functionality for listing and creating custom data types managed by Ghidra's data type manager.
+
+- **`GET /datatypes`**: List data types. Supports pagination and filtering.
+  - Query Parameters:
+    - `?offset=[int]`: Number of data types to skip (default: 0).
+    - `?limit=[int]`: Maximum number of data types to return (default: 100).
+    - `?category=[string]`: Filter by category path substring (e.g. `/winapi`).
+    - `?kind=[struct|enum|union]`: Filter by data type kind.
+  ```json
+  // Example Response
+  "result": [
+    {
+      "name": "MyStruct",
+      "displayName": "MyStruct",
+      "category": "/custom",
+      "length": 16,
+      "kind": "struct",
+      "numComponents": 4
+    },
+    {
+      "name": "ErrorCode",
+      "displayName": "ErrorCode",
+      "category": "/custom",
+      "length": 4,
+      "kind": "enum",
+      "numValues": 12
+    }
+  ],
+  "_links": {
+    "self": { "href": "/datatypes" },
+    "create_struct": { "href": "/datatypes/struct", "method": "POST" },
+    "create_enum": { "href": "/datatypes/enum", "method": "POST" },
+    "create_union": { "href": "/datatypes/union", "method": "POST" }
+  }
+  ```
+
+- **`POST /datatypes/struct`**: Create a new structure data type.
+  - Request Payload:
+    - `name`: Name for the struct (required).
+    - `category`: Category path (optional, defaults to `/`).
+    - `fields`: Optional field definition array. Currently accepted but not yet applied.
+  ```json
+  // Example Request Payload
+  {
+    "name": "NetworkHeader",
+    "category": "/network",
+    "fields": [
+      { "name": "magic", "type": "dword", "size": 4 }
+    ]
+  }
+
+  // Example Response
+  "result": {
+    "name": "NetworkHeader",
+    "category": "/network",
+    "length": 0,
+    "kind": "struct"
+  }
+  ```
+
+- **`POST /datatypes/enum`**: Create a new enum data type.
+  - Request Payload:
+    - `name`: Name for the enum (required).
+    - `category`: Category path (optional, defaults to `/`).
+    - `size`: Enum storage size in bytes (optional, defaults to `4`).
+    - `values`: Optional key/value enum members. Currently accepted but not yet applied.
+  ```json
+  // Example Request Payload
+  {
+    "name": "StatusCode",
+    "category": "/network",
+    "size": 4,
+    "values": {
+      "OK": 0,
+      "ERROR": 1
+    }
+  }
+
+  // Example Response
+  "result": {
+    "name": "StatusCode",
+    "category": "/network",
+    "length": 4,
+    "kind": "enum"
+  }
+  ```
+
+- **`POST /datatypes/union`**: Create a new union data type.
+  - Request Payload:
+    - `name`: Name for the union (required).
+    - `category`: Category path (optional, defaults to `/`).
+    - `fields`: Optional field definition array. Currently accepted but not yet applied.
+  ```json
+  // Example Request Payload
+  {
+    "name": "ScalarValue",
+    "category": "/types",
+    "fields": [
+      { "name": "asInt", "type": "int" },
+      { "name": "asFloat", "type": "float" }
+    ]
+  }
+
+  // Example Response
+  "result": {
+    "name": "ScalarValue",
+    "category": "/types",
+    "length": 0,
+    "kind": "union"
+  }
+  ```
+
 ### 7. Memory Segments
 
-Represents memory blocks/sections defined in the program. 
+Represents memory blocks/sections defined in the program.
 
 - **`GET /segments`**: List all memory segments (e.g., `.text`, `.data`, `.bss`).
 - **`GET /segments/{segment_name}`**: Get details for a specific segment (address range, permissions, size).
 
 ### 8. Memory Access
 
-Provides raw memory access. 
+Provides raw memory access.
 
 - **`GET /memory/{address}`**: Read bytes from memory.
   - Query Parameters:
