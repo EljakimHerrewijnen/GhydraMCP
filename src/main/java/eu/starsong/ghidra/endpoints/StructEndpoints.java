@@ -236,7 +236,7 @@ public class StructEndpoints extends AbstractEndpoint {
             DataTypeManager dtm = program.getDataTypeManager();
             List<Map<String, Object>> structList = new ArrayList<>();
 
-            // Iterate through all data types and filter for structures
+            // Iterate through data types and include both structs and enums
             dtm.getAllDataTypes().forEachRemaining(dataType -> {
                 if (dataType instanceof Structure) {
                     Structure struct = (Structure) dataType;
@@ -265,6 +265,33 @@ public class StructEndpoints extends AbstractEndpoint {
                     structInfo.put("_links", links);
 
                     structList.add(structInfo);
+                } else if (dataType instanceof ghidra.program.model.data.Enum) {
+                    ghidra.program.model.data.Enum enumType = (ghidra.program.model.data.Enum) dataType;
+
+                    // Apply category filter if specified
+                    if (categoryFilter != null && !categoryFilter.isEmpty()) {
+                        CategoryPath catPath = enumType.getCategoryPath();
+                        if (!catPath.getPath().contains(categoryFilter)) {
+                            return;
+                        }
+                    }
+
+                    Map<String, Object> enumInfo = new HashMap<>();
+                    enumInfo.put("name", enumType.getName());
+                    enumInfo.put("path", enumType.getPathName());
+                    enumInfo.put("size", enumType.getLength());
+                    enumInfo.put("numValues", enumType.getCount());
+                    enumInfo.put("category", enumType.getCategoryPath().getPath());
+                    enumInfo.put("description", enumType.getDescription() != null ? enumType.getDescription() : "");
+
+                    // Link enum entries to the generic datatype endpoint
+                    Map<String, Object> links = new HashMap<>();
+                    Map<String, String> selfLink = new HashMap<>();
+                    selfLink.put("href", "/datatypes?name=" + enumType.getName() + "&kind=enum");
+                    links.put("self", selfLink);
+                    enumInfo.put("_links", links);
+
+                    structList.add(enumInfo);
                 }
             });
 
@@ -285,7 +312,7 @@ public class StructEndpoints extends AbstractEndpoint {
     }
 
     /**
-     * Get details of a specific struct including all fields
+     * Get details of a specific struct or enum by name/path
      */
     private void handleGetStruct(HttpExchange exchange, String structName) throws IOException {
         try {
@@ -297,7 +324,7 @@ public class StructEndpoints extends AbstractEndpoint {
 
             DataTypeManager dtm = program.getDataTypeManager();
 
-            // Try to find the struct - support both full paths and simple names
+            // Try to find a struct or enum - support both full paths and simple names
             DataType dataType = null;
 
             // If it looks like a full path (starts with /), try direct lookup
@@ -308,22 +335,31 @@ public class StructEndpoints extends AbstractEndpoint {
                 }
             } else {
                 // Search by simple name using the helper method
-                dataType = findStructByName(dtm, structName);
+                dataType = findStructOrEnumByName(dtm, structName);
             }
 
-            if (dataType == null || !(dataType instanceof Structure)) {
-                sendErrorResponse(exchange, 404, "Struct not found: " + structName, "STRUCT_NOT_FOUND");
+            if (dataType == null || (!(dataType instanceof Structure) && !(dataType instanceof ghidra.program.model.data.Enum))) {
+                sendErrorResponse(exchange, 404, "Struct/Enum not found: " + structName, "RESOURCE_NOT_FOUND");
                 return;
             }
 
-            Structure struct = (Structure) dataType;
-            Map<String, Object> structInfo = buildStructInfo(struct);
+            Map<String, Object> resultInfo;
+            String resolvedName = dataType.getName();
+            if (dataType instanceof Structure) {
+                Structure struct = (Structure) dataType;
+                resultInfo = buildStructInfo(struct);
+                resultInfo.put("isEnum", false);
+            } else {
+                ghidra.program.model.data.Enum enumType = (ghidra.program.model.data.Enum) dataType;
+                resultInfo = buildEnumInfo(enumType);
+                resultInfo.put("isEnum", true);
+            }
 
             ResponseBuilder builder = new ResponseBuilder(exchange, port)
                 .success(true)
-                .result(structInfo);
+                .result(resultInfo);
 
-            builder.addLink("self", "/structs?name=" + struct.getName());
+            builder.addLink("self", "/structs?name=" + resolvedName);
             builder.addLink("structs", "/structs");
             builder.addLink("program", "/program");
 
@@ -332,6 +368,30 @@ public class StructEndpoints extends AbstractEndpoint {
             Msg.error(this, "Error getting struct details", e);
             sendErrorResponse(exchange, 500, "Error getting struct: " + e.getMessage(), "INTERNAL_ERROR");
         }
+    }
+
+    /**
+     * Build a detailed information map for an enum including all values
+     */
+    private Map<String, Object> buildEnumInfo(ghidra.program.model.data.Enum enumType) {
+        Map<String, Object> enumInfo = new HashMap<>();
+        enumInfo.put("name", enumType.getName());
+        enumInfo.put("path", enumType.getPathName());
+        enumInfo.put("size", enumType.getLength());
+        enumInfo.put("category", enumType.getCategoryPath().getPath());
+        enumInfo.put("description", enumType.getDescription() != null ? enumType.getDescription() : "");
+        enumInfo.put("numValues", enumType.getCount());
+
+        List<Map<String, Object>> values = new ArrayList<>();
+        for (String valueName : enumType.getNames()) {
+            Map<String, Object> valueInfo = new HashMap<>();
+            valueInfo.put("name", valueName);
+            valueInfo.put("value", enumType.getValue(valueName));
+            values.add(valueInfo);
+        }
+        enumInfo.put("values", values);
+
+        return enumInfo;
     }
 
     /**
@@ -815,6 +875,23 @@ public class StructEndpoints extends AbstractEndpoint {
 
         dtm.getAllDataTypes().forEachRemaining(dt -> {
             if (dt instanceof Structure && dt.getName().equals(structName)) {
+                if (result[0] == null) {
+                    result[0] = dt;
+                }
+            }
+        });
+
+        return result[0];
+    }
+
+    /**
+     * Find a struct or enum by name, searching through all data types
+     */
+    private DataType findStructOrEnumByName(DataTypeManager dtm, String typeName) {
+        final DataType[] result = new DataType[1];
+
+        dtm.getAllDataTypes().forEachRemaining(dt -> {
+            if ((dt instanceof Structure || dt instanceof ghidra.program.model.data.Enum) && dt.getName().equals(typeName)) {
                 if (result[0] == null) {
                     result[0] = dt;
                 }

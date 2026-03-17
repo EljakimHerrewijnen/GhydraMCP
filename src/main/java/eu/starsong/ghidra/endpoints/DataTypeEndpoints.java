@@ -10,6 +10,8 @@ import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 
 import java.io.IOException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 /**
@@ -59,11 +61,12 @@ public class DataTypeEndpoints extends AbstractEndpoint {
             }
 
             Map<String, String> params = parseQueryParams(exchange);
+            Map<String, String> robustParams = parseQueryParamsRobust(exchange.getRequestURI().getRawQuery());
             int offset = parseIntOrDefault(params.get("offset"), 0);
             int limit = parseIntOrDefault(params.get("limit"), 100);
-            String category = params.get("category");
-            String kind = params.get("kind"); // struct, enum, union
-            String name = params.get("name");
+            String category = firstNonBlank(params.get("category"), robustParams.get("category"));
+            String kind = firstNonBlank(params.get("kind"), robustParams.get("kind")); // struct, enum, union
+            String name = firstNonBlank(params.get("name"), robustParams.get("name"));
 
             DataTypeManager dtm = program.getDataTypeManager();
 
@@ -421,5 +424,40 @@ public class DataTypeEndpoints extends AbstractEndpoint {
         }
 
         return query.toString();
+    }
+
+    private String firstNonBlank(String primary, String fallback) {
+        if (primary != null && !primary.trim().isEmpty()) {
+            return primary;
+        }
+        return fallback;
+    }
+
+    private Map<String, String> parseQueryParamsRobust(String rawQuery) {
+        Map<String, String> result = new HashMap<>();
+        if (rawQuery == null || rawQuery.isEmpty()) {
+            return result;
+        }
+
+        for (String pair : rawQuery.split("&")) {
+            if (pair.isEmpty()) {
+                continue;
+            }
+
+            String[] kv = pair.split("=", 2);
+            String key = urlDecode(kv[0]);
+            String value = kv.length > 1 ? urlDecode(kv[1]) : "";
+            result.put(key, value);
+        }
+
+        return result;
+    }
+
+    private String urlDecode(String value) {
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return value;
+        }
     }
 }

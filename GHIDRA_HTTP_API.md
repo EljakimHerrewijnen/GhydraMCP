@@ -437,9 +437,9 @@ Provides access to string data in the binary.
 
 ### 6.2 Structs
 
-Provides functionality for creating and managing struct (composite) data types.
+Provides functionality for creating and managing struct (composite) data types. The listing endpoint also includes enum data types for convenient discovery.
 
-- **`GET /structs`**: List all struct data types in the program. Supports pagination and filtering.
+- **`GET /structs`**: List struct and enum data types in the program. Supports pagination and filtering.
   - Query Parameters:
     - `?offset=[int]`: Number of structs to skip (default: 0).
     - `?limit=[int]`: Maximum number of structs to return (default: 100).
@@ -451,16 +451,18 @@ Provides functionality for creating and managing struct (composite) data types.
       "name": "MyStruct",
       "path": "/custom/MyStruct",
       "size": 16,
+      "isEnum": false,
       "numFields": 4,
       "category": "/custom",
       "description": "Custom data structure"
     },
     {
-      "name": "FileHeader",
-      "path": "/FileHeader",
-      "size": 32,
-      "numFields": 8,
-      "category": "/",
+      "name": "REGION",
+      "path": "/windows/REGION",
+      "size": 4,
+      "isEnum": true,
+      "numValues": 6,
+      "category": "/windows",
       "description": ""
     }
   ],
@@ -470,13 +472,18 @@ Provides functionality for creating and managing struct (composite) data types.
   }
   ```
 
-- **`GET /structs?name={struct_name}`**: Get detailed information about a specific struct including all fields.
+- **`GET /structs?name={type_name}`**: Get detailed information about a specific struct or enum.
+
+  Response shape depends on type:
+  - Struct: includes `numFields`, `fields`, and `isEnum: false`.
+  - Enum: includes `numValues`, `values`, and `isEnum: true`.
   ```json
   // Example Response for GET /structs?name=MyStruct
   "result": {
     "name": "MyStruct",
     "path": "/custom/MyStruct",
     "size": 16,
+    "isEnum": false,
     "category": "/custom",
     "description": "Custom data structure",
     "numFields": 4,
@@ -517,6 +524,29 @@ Provides functionality for creating and managing struct (composite) data types.
   },
   "_links": {
     "self": { "href": "/structs?name=MyStruct" },
+    "structs": { "href": "/structs" },
+    "program": { "href": "/program" }
+  }
+  ```
+
+  ```json
+  // Example Response for GET /structs?name=REGION
+  "result": {
+    "name": "REGION",
+    "path": "/windows/REGION",
+    "size": 4,
+    "isEnum": true,
+    "category": "/windows",
+    "description": "",
+    "numValues": 6,
+    "values": [
+      { "name": "MEM_PRIVATE", "value": 131072 },
+      { "name": "MEM_MAPPED", "value": 262144 },
+      { "name": "MEM_IMAGE", "value": 16777216 }
+    ]
+  },
+  "_links": {
+    "self": { "href": "/structs?name=REGION" },
     "structs": { "href": "/structs" },
     "program": { "href": "/program" }
   }

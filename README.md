@@ -40,18 +40,18 @@ GhydraMCP version 2.2.0 provides a comprehensive set of reverse engineering capa
 ## Advanced Program Analysis
 
 - **Enhanced Decompilation**:
-  - Convert binary functions to readable C code 
+  - Convert binary functions to readable C code
   - Toggle between clean C-like pseudocode and raw decompiler output
   - Show/hide syntax trees for detailed analysis
   - Multiple simplification styles for different analysis approaches
-  
-- **Comprehensive Static Analysis**: 
+
+- **Comprehensive Static Analysis**:
   - Cross-reference analysis (find callers and callees)
   - Complete call graph generation and traversal
   - Data flow analysis with variable tracking
   - Type propagation and reconstruction
   - Function relationship mapping
-  
+
 - **Memory Operations**:
   - Direct memory reading with hex and raw byte representation
   - Address space navigation and mapping
@@ -70,9 +70,9 @@ GhydraMCP version 2.2.0 provides a comprehensive set of reverse engineering capa
   - Analyze data structures and complex types
   - View disassembly with linking to decompiled code
   - Examine function prototypes and signatures
-  
+
 - **Comprehensive Annotation**:
-  - Rename functions, variables, and data 
+  - Rename functions, variables, and data
   - Add multiple comment types (EOL, plate, pre/post)
   - Create and modify data types
   - Set and update function signatures and prototypes
@@ -218,8 +218,8 @@ GhydraMCP v2.2.0 organizes tools into logical namespaces for better discoverabil
 - `data_set_type`: Change data type (params: address, data_type, port [optional])
 
 **Struct Management** (`structs_*`):
-- `structs_list`: List all struct data types (params: offset, limit, category [optional], port [optional])
-- `structs_get`: Get detailed struct information (params: name, port [optional])
+- `structs_list`: List struct and enum data types (params: offset, limit, category [optional], port [optional])
+- `structs_get`: Get detailed struct or enum information (params: name, port [optional]; result includes `isEnum`)
 - `structs_create`: Create new struct (params: name, category [optional], description [optional], port [optional])
 - `structs_add_field`: Add field to struct (params: struct_name, field_name, field_type, offset [optional], comment [optional], port [optional])
 - `structs_update_field`: Update struct field (params: struct_name, field_name or field_offset, new_name [optional], new_type [optional], new_comment [optional], port [optional])
