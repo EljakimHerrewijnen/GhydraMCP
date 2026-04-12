@@ -15,11 +15,13 @@ import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressFactory;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.CodeUnit;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.HighSymbol;
+import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.util.Msg;
 import ghidra.util.task.ConsoleTaskMonitor;
@@ -32,6 +34,8 @@ import java.util.Map;
 import java.io.IOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 
 /**
  * Endpoints for managing functions within a program.
@@ -54,7 +58,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         super(program, port, cache);
         this.tool = tool;
     }
-    
+
     @Override
     protected PluginTool getTool() {
         return tool;
@@ -77,7 +81,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         // Register function-specific endpoints
         registerAdditionalEndpoints(server);
     }
-    
+
     /**
      * Register additional convenience endpoints
      */
@@ -85,20 +89,20 @@ public class FunctionEndpoints extends AbstractEndpoint {
         // NOTE: The /function endpoint is already registered in ProgramEndpoints
         // We don't register it here to avoid duplicating functionality
     }
-    
+
     /**
      * Handle requests to the /functions/{address} endpoint
      */
     private void handleFunctionByAddress(HttpExchange exchange) throws IOException {
         try {
             String path = exchange.getRequestURI().getPath();
-            
+
             // Check if this is the base endpoint
             if (path.equals("/functions") || path.equals("/functions/")) {
                 handleFunctions(exchange);
                 return;
             }
-            
+
             // Get the current program
             Program program = getCurrentProgram();
             if (program == null) {
@@ -108,7 +112,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
 
             // Extract function address from path
             String functionAddress = path.substring("/functions/".length());
-            
+
             // Check for nested resources
             if (functionAddress.contains("/")) {
                 String resource = functionAddress.substring(functionAddress.indexOf('/') + 1);
@@ -116,23 +120,23 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 handleFunctionResource(exchange, functionAddress, resource);
                 return;
             }
-            
+
             Function function = findFunctionByAddress(functionAddress);
             if (function == null) {
                 sendErrorResponse(exchange, 404, "Function not found at address: " + functionAddress, "FUNCTION_NOT_FOUND");
                 return;
             }
-            
+
             String method = exchange.getRequestMethod();
-            
+
             if ("GET".equals(method)) {
                 // Get function details using RESTful response structure
                 FunctionInfo info = buildFunctionInfo(function);
-                
+
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
                     .result(info);
-                
+
                 // Add HATEOAS links
                 String baseUrl = "/functions/" + functionAddress;
                 builder.addLink("self", baseUrl);
@@ -140,12 +144,16 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 builder.addLink("decompile", baseUrl + "/decompile");
                 builder.addLink("disassembly", baseUrl + "/disassembly");
                 builder.addLink("variables", baseUrl + "/variables");
+                builder.addLink("comments", baseUrl + "/comments");
+                builder.addLink("callers", baseUrl + "/callers");
+                builder.addLink("callees", baseUrl + "/callees");
+                builder.addLink("hash", baseUrl + "/hash");
                 builder.addLink("by_name", "/functions/by-name/" + function.getName());
-                
+
                 // Add xrefs links
                 builder.addLink("xrefs_to", "/xrefs?to_addr=" + function.getEntryPoint());
                 builder.addLink("xrefs_from", "/xrefs?from_addr=" + function.getEntryPoint());
-                
+
                 sendJsonResponse(exchange, builder.build(), 200);
             } else if ("PATCH".equals(method)) {
                 // Update function
@@ -161,17 +169,17 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 500, "Internal Server Error: " + e.getMessage(), "INTERNAL_ERROR");
         }
     }
-    
+
     /**
      * Handle requests to the /functions/by-name/{name} endpoint
      */
     private void handleFunctionByName(HttpExchange exchange) throws IOException {
         try {
             String path = exchange.getRequestURI().getPath();
-            
+
             // Extract function name from path (only supporting new format)
             String functionName = path.substring("/functions/by-name/".length());
-            
+
             // Check for nested resources
             if (functionName.contains("/")) {
                 String resource = functionName.substring(functionName.indexOf('/') + 1);
@@ -179,23 +187,23 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 handleFunctionResource(exchange, functionName, resource);
                 return;
             }
-            
+
             Function function = findFunctionByName(functionName);
             if (function == null) {
                 sendErrorResponse(exchange, 404, "Function not found with name: " + functionName, "FUNCTION_NOT_FOUND");
                 return;
             }
-            
+
             String method = exchange.getRequestMethod();
-            
+
             if ("GET".equals(method)) {
                 // Get function details using RESTful response structure
                 FunctionInfo info = buildFunctionInfo(function);
-                
+
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
                     .result(info);
-                
+
                 // Add HATEOAS links
                 builder.addLink("self", "/functions/by-name/" + functionName);
                 builder.addLink("program", "/program");
@@ -203,7 +211,11 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 builder.addLink("decompile", "/functions/" + function.getEntryPoint() + "/decompile");
                 builder.addLink("disassembly", "/functions/" + function.getEntryPoint() + "/disassembly");
                 builder.addLink("variables", "/functions/by-name/" + functionName + "/variables");
-                
+                builder.addLink("comments", "/functions/" + function.getEntryPoint() + "/comments");
+                builder.addLink("callers", "/functions/" + function.getEntryPoint() + "/callers");
+                builder.addLink("callees", "/functions/" + function.getEntryPoint() + "/callees");
+                builder.addLink("hash", "/functions/" + function.getEntryPoint() + "/hash");
+
                 sendJsonResponse(exchange, builder.build(), 200);
             } else if ("PATCH".equals(method)) {
                 // Update function
@@ -216,7 +228,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 500, "Internal Server Error: " + e.getMessage(), "INTERNAL_ERROR");
         }
     }
-    
+
     /**
      * Handle requests to all functions within the current program
      */
@@ -230,75 +242,75 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 String nameContainsFilter = params.get("name_contains");
                 String nameRegexFilter = params.get("name_matches_regex");
                 String addrFilter = params.get("addr");
-                
+
                 Program program = getCurrentProgram();
                 if (program == null) {
                     sendErrorResponse(exchange, 400, "No program is currently loaded", "NO_PROGRAM_LOADED");
                     return;
                 }
-                
+
                 List<Map<String, Object>> functions = new ArrayList<>();
-                
+
                 // Get all functions
                 for (Function f : program.getFunctionManager().getFunctions(true)) {
                     // Apply filters
                     if (nameFilter != null && !f.getName().equals(nameFilter)) {
                         continue;
                     }
-                    
+
                     if (nameContainsFilter != null && !f.getName().toLowerCase().contains(nameContainsFilter.toLowerCase())) {
                         continue;
                     }
-                    
+
                     if (nameRegexFilter != null && !f.getName().matches(nameRegexFilter)) {
                         continue;
                     }
-                    
+
                     if (addrFilter != null && !f.getEntryPoint().toString().equals(addrFilter)) {
                         continue;
                     }
-                    
+
                     Map<String, Object> func = new HashMap<>();
                     func.put("name", f.getName());
                     func.put("address", f.getEntryPoint().toString());
-                    
+
                     // Add HATEOAS links
                     Map<String, Object> links = new HashMap<>();
                     Map<String, String> selfLink = new HashMap<>();
                     selfLink.put("href", "/programs/current/functions/" + f.getEntryPoint());
                     links.put("self", selfLink);
-                    
+
                     Map<String, String> byNameLink = new HashMap<>();
                     byNameLink.put("href", "/programs/current/functions/by-name/" + f.getName());
                     links.put("by_name", byNameLink);
-                    
+
                     Map<String, String> decompileLink = new HashMap<>();
                     decompileLink.put("href", "/programs/current/functions/" + f.getEntryPoint() + "/decompile");
                     links.put("decompile", decompileLink);
-                    
+
                     func.put("_links", links);
-                    
+
                     functions.add(func);
                 }
-                
+
                 // Apply pagination
                 int endIndex = Math.min(functions.size(), offset + limit);
-                List<Map<String, Object>> paginatedFunctions = offset < functions.size() 
-                    ? functions.subList(offset, endIndex) 
+                List<Map<String, Object>> paginatedFunctions = offset < functions.size()
+                    ? functions.subList(offset, endIndex)
                     : new ArrayList<>();
-                
+
                 // Build response with pagination links
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
                     .result(paginatedFunctions);
-                
+
                 // Add pagination metadata
                 Map<String, Object> metadata = new HashMap<>();
                 metadata.put("size", functions.size());
                 metadata.put("offset", offset);
                 metadata.put("limit", limit);
                 builder.metadata(metadata);
-                
+
                 // Add query parameters for self link
                 StringBuilder queryParams = new StringBuilder();
                 if (nameFilter != null) {
@@ -313,26 +325,26 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 if (addrFilter != null) {
                     queryParams.append("addr=").append(addrFilter).append("&");
                 }
-                
+
                 String queryString = queryParams.toString();
-                
+
                 // Add HATEOAS links
                 builder.addLink("self", "/programs/current/functions?" + queryString + "offset=" + offset + "&limit=" + limit);
                 builder.addLink("program", "/programs/current");
-                
+
                 // Add next/prev links if applicable
                 if (endIndex < functions.size()) {
                     builder.addLink("next", "/programs/current/functions?" + queryString + "offset=" + endIndex + "&limit=" + limit);
                 }
-                
+
                 if (offset > 0) {
                     int prevOffset = Math.max(0, offset - limit);
                     builder.addLink("prev", "/programs/current/functions?" + queryString + "offset=" + prevOffset + "&limit=" + limit);
                 }
-                
+
                 // Add link to create a new function
                 builder.addLink("create", "/programs/current/functions", "POST");
-                
+
                 sendJsonResponse(exchange, builder.build(), 200);
             } else if ("POST".equals(exchange.getRequestMethod())) {
                 // Create a new function
@@ -345,7 +357,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 500, "Internal Server Error: " + e.getMessage(), "INTERNAL_ERROR");
         }
     }
-    
+
     /**
      * Handle requests to function resources like /programs/current/functions/{address}/decompile
      */
@@ -355,7 +367,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 404, "Function not found at address: " + functionAddress, "FUNCTION_NOT_FOUND");
             return;
         }
-        
+
         if (resource.equals("decompile")) {
             handleDecompileFunction(exchange, function);
         } else if (resource.equals("disassembly")) {
@@ -366,7 +378,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 404, "Function resource not found: " + resource, "RESOURCE_NOT_FOUND");
         }
     }
-    
+
     /**
      * Handle requests to function resources by name like /programs/current/functions/by-name/{name}/variables
      */
@@ -376,7 +388,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 404, "Function not found with name: " + functionName, "FUNCTION_NOT_FOUND");
             return;
         }
-        
+
         if (resource.equals("variables")) {
             handleFunctionVariables(exchange, function);
         } else if (resource.equals("decompile")) {
@@ -387,7 +399,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 404, "Function resource not found: " + resource, "RESOURCE_NOT_FOUND");
         }
     }
-    
+
     /**
      * Handle PATCH requests to update a function using the RESTful endpoint
      */
@@ -398,16 +410,16 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 400, "No program is currently loaded", "NO_PROGRAM_LOADED");
             return;
         }
-        
+
         // Parse request body
         Map<String, String> params = parseJsonPostParams(exchange);
         String newName = params.get("name");
         String signature = params.get("signature");
         String comment = params.get("comment");
-        
+
         // Apply changes
         boolean changed = false;
-        
+
         if (newName != null && !newName.isEmpty() && !newName.equals(function.getName())) {
             // Rename function
             try {
@@ -471,7 +483,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
 
         sendJsonResponse(exchange, builder.build(), 200);
     }
-    
+
     /**
      * Handle DELETE requests to delete a function using the RESTful endpoint
      */
@@ -479,7 +491,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         // Placeholder for function deletion
         sendErrorResponse(exchange, 501, "Function deletion not implemented", "NOT_IMPLEMENTED");
     }
-    
+
     /**
      * Handle POST requests to create a new function using the RESTful endpoint
      */
@@ -489,44 +501,44 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 400, "No program is currently loaded", "NO_PROGRAM_LOADED");
             return;
         }
-        
+
         // Parse request body
         Map<String, String> params = parseJsonPostParams(exchange);
         String addressStr = params.get("address");
-        
+
         if (addressStr == null || addressStr.isEmpty()) {
             sendErrorResponse(exchange, 400, "Missing address parameter", "MISSING_PARAMETER");
             return;
         }
-        
+
         // Get address
         AddressFactory addressFactory = program.getAddressFactory();
         Address address;
-        
+
         try {
             address = addressFactory.getAddress(addressStr);
         } catch (Exception e) {
             sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_ADDRESS");
             return;
         }
-        
+
         if (address == null) {
             sendErrorResponse(exchange, 400, "Invalid address: " + addressStr, "INVALID_ADDRESS");
             return;
         }
-        
+
         // Check if address is in a valid memory block
         if (program.getMemory().getBlock(address) == null) {
              sendErrorResponse(exchange, 400, "Address is not in a defined memory block: " + addressStr, "INVALID_ADDRESS");
              return;
         }
-        
+
         // Check if function already exists
         if (program.getFunctionManager().getFunctionAt(address) != null) {
             sendErrorResponse(exchange, 409, "Function already exists at address: " + addressStr, "FUNCTION_EXISTS");
             return;
         }
-        
+
         // Use CreateFunctionCmd — same as pressing F in the UI
         try {
             Function function = TransactionHelper.executeInTransaction(program, "Create function at " + addressStr, () -> {
@@ -674,41 +686,41 @@ public class FunctionEndpoints extends AbstractEndpoint {
                         functions.add(func);
                     }
                 }
-                
+
                 // Apply pagination
                 int endIndex = Math.min(functions.size(), offset + limit);
-                List<Map<String, Object>> paginatedFunctions = offset < functions.size() 
-                    ? functions.subList(offset, endIndex) 
+                List<Map<String, Object>> paginatedFunctions = offset < functions.size()
+                    ? functions.subList(offset, endIndex)
                     : new ArrayList<>();
-                
+
                 // Build response with pagination links
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
                     .result(paginatedFunctions);
-                
+
                 // Add pagination metadata
                 Map<String, Object> metadata = new HashMap<>();
                 metadata.put("size", functions.size());
                 metadata.put("offset", offset);
                 metadata.put("limit", limit);
                 builder.metadata(metadata);
-                
+
                 // Add HATEOAS links
                 builder.addLink("self", "/functions?offset=" + offset + "&limit=" + limit);
-                
+
                 // Add next/prev links if applicable
                 if (endIndex < functions.size()) {
                     builder.addLink("next", "/functions?offset=" + endIndex + "&limit=" + limit);
                 }
-                
+
                 if (offset > 0) {
                     int prevOffset = Math.max(0, offset - limit);
                     builder.addLink("prev", "/functions?offset=" + prevOffset + "&limit=" + limit);
                 }
-                
+
                 // Add link to create a new function
                 builder.addLink("create", "/functions", "POST");
-                
+
                 sendJsonResponse(exchange, builder.build(), 200);
             } else if ("POST".equals(exchange.getRequestMethod())) {
                 // Create a new function
@@ -728,7 +740,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
     private void handleFunction(HttpExchange exchange, String path) throws IOException {
         try {
             String functionName;
-            
+
             // If path is provided, use it; otherwise extract from the request URI
             if (path != null && path.startsWith("/functions/")) {
                 functionName = path.substring("/functions/".length());
@@ -736,15 +748,15 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 String requestPath = exchange.getRequestURI().getPath();
                 functionName = requestPath.substring("/functions/".length());
             }
-            
+
             // Check for nested resources
             if (functionName.contains("/")) {
                 handleFunctionResource(exchange, functionName);
                 return;
             }
-            
+
             String method = exchange.getRequestMethod();
-            
+
             if ("GET".equals(method)) {
                 // Get function details
                 handleGetFunction(exchange, functionName);
@@ -762,7 +774,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 500, "Internal Server Error: " + e.getMessage(), "INTERNAL_ERROR");
         }
     }
-    
+
     /**
      * Handle requests to the /functions/{name} endpoint derived from the path
      */
@@ -770,15 +782,15 @@ public class FunctionEndpoints extends AbstractEndpoint {
         try {
             String path = exchange.getRequestURI().getPath();
             String functionName = path.substring("/functions/".length());
-            
+
             // Check for nested resources
             if (functionName.contains("/")) {
                 handleFunctionResource(exchange, functionName);
                 return;
             }
-            
+
             String method = exchange.getRequestMethod();
-            
+
             if ("GET".equals(method)) {
                 // Get function details
                 handleGetFunction(exchange, functionName);
@@ -802,26 +814,34 @@ public class FunctionEndpoints extends AbstractEndpoint {
      */
     private void handleFunctionResource(HttpExchange exchange, String functionIdent, String resource) throws IOException {
         Function function = null;
-        
+
         // Try to find function by address first
         function = findFunctionByAddress(functionIdent);
-        
+
         // If not found by address, try by name
         if (function == null) {
             function = findFunctionByName(functionIdent);
         }
-        
+
         if (function == null) {
             sendErrorResponse(exchange, 404, "Function not found: " + functionIdent, "FUNCTION_NOT_FOUND");
             return;
         }
-        
+
         if (resource.equals("decompile")) {
             handleDecompileFunction(exchange, function);
         } else if (resource.equals("disassembly")) {
             handleDisassembleFunction(exchange, function);
         } else if (resource.equals("variables")) {
             handleFunctionVariables(exchange, function);
+        } else if (resource.equals("comments")) {
+            handleFunctionComments(exchange, function);
+        } else if (resource.equals("callers")) {
+            handleFunctionCallers(exchange, function);
+        } else if (resource.equals("callees")) {
+            handleFunctionCallees(exchange, function);
+        } else if (resource.equals("hash")) {
+            handleFunctionHash(exchange, function);
         } else if (resource.startsWith("variables/")) {
             // Handle variable operations
             String variableName = resource.substring("variables/".length());
@@ -834,7 +854,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 404, "Function resource not found: " + resource, "RESOURCE_NOT_FOUND");
         }
     }
-    
+
     private void handleFunctionResource(HttpExchange exchange, String functionPath) throws IOException {
         int slashIndex = functionPath.indexOf('/');
         if (slashIndex == -1) {
@@ -843,7 +863,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         }
         String functionIdent = functionPath.substring(0, slashIndex);
         String resource = functionPath.substring(slashIndex + 1);
-        
+
         handleFunctionResource(exchange, functionIdent, resource);
     }
 
@@ -856,32 +876,32 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 400, "No program is currently loaded", "NO_PROGRAM_LOADED");
             return;
         }
-        
+
         Function function = findFunctionByName(functionName);
         if (function == null) {
             sendErrorResponse(exchange, 404, "Function not found: " + functionName, "FUNCTION_NOT_FOUND");
             return;
         }
-        
+
         // Build function info
         FunctionInfo info = buildFunctionInfo(function);
-        
+
         // Build response with HATEOAS links
         ResponseBuilder builder = new ResponseBuilder(exchange, port)
             .success(true)
             .result(info);
-        
+
         // Add HATEOAS links
         builder.addLink("self", "/functions/" + functionName);
         builder.addLink("program", "/programs/current");
         builder.addLink("decompile", "/functions/" + functionName + "/decompile");
         builder.addLink("disassembly", "/functions/" + functionName + "/disassembly");
         builder.addLink("variables", "/functions/" + functionName + "/variables");
-        
+
         // Add xrefs links
         builder.addLink("xrefs_to", "/programs/current/xrefs?to_addr=" + function.getEntryPoint().toString());
         builder.addLink("xrefs_from", "/programs/current/xrefs?from_addr=" + function.getEntryPoint().toString());
-        
+
         sendJsonResponse(exchange, builder.build(), 200);
     }
 
@@ -894,22 +914,22 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 400, "No program is currently loaded", "NO_PROGRAM_LOADED");
             return;
         }
-        
+
         Function function = findFunctionByName(functionName);
         if (function == null) {
             sendErrorResponse(exchange, 404, "Function not found: " + functionName, "FUNCTION_NOT_FOUND");
             return;
         }
-        
+
         // Parse request body
         Map<String, String> params = parseJsonPostParams(exchange);
         String newName = params.get("name");
         String signature = params.get("signature");
         String comment = params.get("comment");
-        
+
         // Apply changes
         boolean changed = false;
-        
+
         if (newName != null && !newName.isEmpty() && !newName.equals(function.getName())) {
             // Rename function
             try {
@@ -961,14 +981,14 @@ public class FunctionEndpoints extends AbstractEndpoint {
 
         // Return updated function
         FunctionInfo info = buildFunctionInfo(function);
-        
+
         ResponseBuilder builder = new ResponseBuilder(exchange, port)
             .success(true)
             .result(info);
-        
+
         // Add HATEOAS links
         builder.addLink("self", "/functions/" + function.getName());
-        
+
         sendJsonResponse(exchange, builder.build(), 200);
     }
 
@@ -989,32 +1009,32 @@ public class FunctionEndpoints extends AbstractEndpoint {
             sendErrorResponse(exchange, 400, "No program is currently loaded", "NO_PROGRAM_LOADED");
             return;
         }
-        
+
         // Parse request body
         Map<String, String> params = parseJsonPostParams(exchange);
         String addressStr = params.get("address");
-        
+
         if (addressStr == null || addressStr.isEmpty()) {
             sendErrorResponse(exchange, 400, "Missing address parameter", "MISSING_PARAMETER");
             return;
         }
-        
+
         // Get address
         AddressFactory addressFactory = program.getAddressFactory();
         Address address;
-        
+
         try {
             address = addressFactory.getAddress(addressStr);
         } catch (Exception e) {
             sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_ADDRESS");
             return;
         }
-        
+
         if (address == null) {
             sendErrorResponse(exchange, 400, "Invalid address: " + addressStr, "INVALID_ADDRESS");
             return;
         }
-        
+
         // Check if function already exists
         if (program.getFunctionManager().getFunctionAt(address) != null) {
             sendErrorResponse(exchange, 409, "Function already exists at address: " + addressStr, "FUNCTION_EXISTS");
@@ -1135,21 +1155,21 @@ public class FunctionEndpoints extends AbstractEndpoint {
             if (syntaxTree) {
                 result.put("syntax_tree", "Syntax tree not implemented");
             }
-            
+
             ResponseBuilder builder = new ResponseBuilder(exchange, port)
                 .success(true)
                 .result(result);
-            
+
             // Path for links (updated to use the correct paths)
             String functionPath = "/functions/" + function.getEntryPoint().toString();
-            
+
             // Add HATEOAS links
             builder.addLink("self", functionPath + "/decompile");
             builder.addLink("function", functionPath);
             builder.addLink("disassembly", functionPath + "/disassembly");
             builder.addLink("variables", functionPath + "/variables");
             builder.addLink("program", "/program");
-            
+
             sendJsonResponse(exchange, builder.build(), 200);
         } else {
             sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
@@ -1282,7 +1302,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             } else {
                 variables = GhidraUtil.getFunctionVariables(function);
             }
-            
+
             Map<String, Object> functionInfo = new HashMap<>();
             functionInfo.put("address", function.getEntryPoint().toString());
             functionInfo.put("name", function.getName());
@@ -1292,26 +1312,30 @@ public class FunctionEndpoints extends AbstractEndpoint {
             if (function.getCallingConventionName() != null) {
                 functionInfo.put("callingConvention", function.getCallingConventionName());
             }
-            
+
             Map<String, Object> result = new HashMap<>();
             result.put("function", functionInfo);
             result.put("variables", variables);
-            
+
             // Update to use the correct paths
             String functionPath = "/functions/" + function.getEntryPoint().toString();
             String functionByNamePath = "/functions/by-name/" + function.getName();
-            
+
             ResponseBuilder builder = new ResponseBuilder(exchange, port)
                 .success(true)
                 .result(result);
-            
+
             builder.addLink("self", functionPath + "/variables");
             builder.addLink("function", functionPath);
             builder.addLink("by_name", functionByNamePath);
             builder.addLink("decompile", functionPath + "/decompile");
             builder.addLink("disassembly", functionPath + "/disassembly");
+            builder.addLink("comments", functionPath + "/comments");
+            builder.addLink("callers", functionPath + "/callers");
+            builder.addLink("callees", functionPath + "/callees");
+            builder.addLink("hash", functionPath + "/hash");
             builder.addLink("program", "/program");
-            
+
             sendJsonResponse(exchange, builder.build(), 200);
         } else if ("PATCH".equals(exchange.getRequestMethod())) {
             String path = exchange.getRequestURI().getPath();
@@ -1327,6 +1351,340 @@ public class FunctionEndpoints extends AbstractEndpoint {
     }
 
     /**
+     * Handle requests to function comments.
+     */
+    private void handleFunctionComments(HttpExchange exchange, Function function) throws IOException {
+        Program program = getCurrentProgram();
+        if (program == null) {
+            sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+            return;
+        }
+
+        String method = exchange.getRequestMethod();
+        Address entry = function.getEntryPoint();
+        CodeUnit codeUnit = program.getListing().getCodeUnitAt(entry);
+
+        if ("GET".equals(method)) {
+            Map<String, Object> comments = new HashMap<>();
+            comments.put("address", entry.toString());
+            comments.put("function", function.getName());
+            comments.put("plate", function.getComment());
+            comments.put("decompiler_comment", codeUnit != null ? codeUnit.getComment(CodeUnit.PRE_COMMENT) : null);
+            comments.put("disassembly_comment", codeUnit != null ? codeUnit.getComment(CodeUnit.EOL_COMMENT) : null);
+            comments.put("eol_comment", codeUnit != null ? codeUnit.getComment(CodeUnit.EOL_COMMENT) : null);
+
+            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                .success(true)
+                .result(comments);
+
+            String functionPath = "/functions/" + entry;
+            builder.addLink("self", functionPath + "/comments");
+            builder.addLink("function", functionPath);
+            builder.addLink("decompile", functionPath + "/decompile");
+            builder.addLink("disassembly", functionPath + "/disassembly");
+
+            sendJsonResponse(exchange, builder.build(), 200);
+            return;
+        }
+
+        if ("PATCH".equals(method)) {
+            Map<String, String> params = parseJsonPostParams(exchange);
+            String plate = params.get("plate");
+            String decompilerComment = params.get("decompiler_comment");
+            String disassemblyComment = params.get("disassembly_comment");
+            String eolComment = params.get("eol_comment");
+
+            if (plate == null && decompilerComment == null && disassemblyComment == null && eolComment == null) {
+                sendErrorResponse(exchange, 400, "No comment fields provided", "MISSING_PARAMETER");
+                return;
+            }
+
+            try {
+                TransactionHelper.executeInTransaction(program, "Update function comments " + function.getName(), () -> {
+                    if (plate != null) {
+                        function.setComment(plate);
+                    }
+                    CodeUnit cu = program.getListing().getCodeUnitAt(entry);
+                    if (cu != null) {
+                        if (decompilerComment != null) {
+                            cu.setComment(CodeUnit.PRE_COMMENT, decompilerComment);
+                        }
+                        if (disassemblyComment != null) {
+                            cu.setComment(CodeUnit.EOL_COMMENT, disassemblyComment);
+                        }
+                        if (eolComment != null) {
+                            cu.setComment(CodeUnit.EOL_COMMENT, eolComment);
+                        }
+                    }
+                    return null;
+                });
+            } catch (Exception e) {
+                sendErrorResponse(exchange, 400, "Failed to update comments: " + e.getMessage(), "COMMENT_FAILED");
+                return;
+            }
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("address", entry.toString());
+            result.put("function", function.getName());
+            result.put("message", "Comments updated");
+
+            sendSuccessResponse(exchange, result);
+            return;
+        }
+
+        if ("DELETE".equals(method)) {
+            String type = parseQueryParams(exchange).getOrDefault("type", "all");
+
+            try {
+                TransactionHelper.executeInTransaction(program, "Clear function comments " + function.getName(), () -> {
+                    CodeUnit cu = program.getListing().getCodeUnitAt(entry);
+
+                    if ("all".equalsIgnoreCase(type) || "plate".equalsIgnoreCase(type)) {
+                        function.setComment(null);
+                    }
+                    if (cu != null) {
+                        if ("all".equalsIgnoreCase(type) || "decompiler".equalsIgnoreCase(type)) {
+                            cu.setComment(CodeUnit.PRE_COMMENT, null);
+                        }
+                        if ("all".equalsIgnoreCase(type) || "disassembly".equalsIgnoreCase(type) || "eol".equalsIgnoreCase(type)) {
+                            cu.setComment(CodeUnit.EOL_COMMENT, null);
+                        }
+                    }
+                    return null;
+                });
+            } catch (Exception e) {
+                sendErrorResponse(exchange, 400, "Failed to clear comments: " + e.getMessage(), "COMMENT_FAILED");
+                return;
+            }
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("address", entry.toString());
+            result.put("function", function.getName());
+            result.put("cleared", type);
+
+            sendSuccessResponse(exchange, result);
+            return;
+        }
+
+        sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+    }
+
+    /**
+     * Handle requests to list callers of a function.
+     */
+    private void handleFunctionCallers(HttpExchange exchange, Function function) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+            return;
+        }
+
+        Program program = getCurrentProgram();
+        if (program == null) {
+            sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+            return;
+        }
+
+        Map<String, String> params = parseQueryParams(exchange);
+        int offset = parseIntOrDefault(params.get("offset"), 0);
+        int limit = parseIntOrDefault(params.get("limit"), 100);
+
+        List<Map<String, Object>> callers = new ArrayList<>();
+
+        for (Reference ref : program.getReferenceManager().getReferencesTo(function.getEntryPoint())) {
+            if (!ref.getReferenceType().isCall()) {
+                continue;
+            }
+            Function caller = program.getFunctionManager().getFunctionContaining(ref.getFromAddress());
+            if (caller == null) {
+                continue;
+            }
+
+            Map<String, Object> item = new HashMap<>();
+            item.put("name", caller.getName());
+            item.put("address", caller.getEntryPoint().toString());
+            item.put("call_site", ref.getFromAddress().toString());
+            item.put("type", ref.getReferenceType().toString());
+            callers.add(item);
+        }
+
+        int endIndex = Math.min(callers.size(), offset + limit);
+        List<Map<String, Object>> page = offset < callers.size() ? callers.subList(offset, endIndex) : new ArrayList<>();
+
+        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            .success(true)
+            .result(page);
+
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("size", callers.size());
+        metadata.put("offset", offset);
+        metadata.put("limit", limit);
+        builder.metadata(metadata);
+
+        String functionPath = "/functions/" + function.getEntryPoint();
+        String basePath = functionPath + "/callers";
+        builder.addLink("self", basePath + "?offset=" + offset + "&limit=" + limit);
+        builder.addLink("function", functionPath);
+        if (endIndex < callers.size()) {
+            builder.addLink("next", basePath + "?offset=" + endIndex + "&limit=" + limit);
+        }
+        if (offset > 0) {
+            int prevOffset = Math.max(0, offset - limit);
+            builder.addLink("prev", basePath + "?offset=" + prevOffset + "&limit=" + limit);
+        }
+
+        sendJsonResponse(exchange, builder.build(), 200);
+    }
+
+    /**
+     * Handle requests to list callees of a function.
+     */
+    private void handleFunctionCallees(HttpExchange exchange, Function function) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+            return;
+        }
+
+        Program program = getCurrentProgram();
+        if (program == null) {
+            sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+            return;
+        }
+
+        Map<String, String> params = parseQueryParams(exchange);
+        int offset = parseIntOrDefault(params.get("offset"), 0);
+        int limit = parseIntOrDefault(params.get("limit"), 100);
+
+        List<Map<String, Object>> callees = new ArrayList<>();
+
+        ghidra.program.model.listing.Listing listing = program.getListing();
+        ghidra.program.model.listing.InstructionIterator instructionIterator = listing.getInstructions(function.getBody(), true);
+
+        while (instructionIterator.hasNext()) {
+            ghidra.program.model.listing.Instruction instruction = instructionIterator.next();
+            for (Reference ref : instruction.getReferencesFrom()) {
+                if (!ref.getReferenceType().isCall()) {
+                    continue;
+                }
+                Function callee = program.getFunctionManager().getFunctionAt(ref.getToAddress());
+                if (callee == null) {
+                    callee = program.getFunctionManager().getFunctionContaining(ref.getToAddress());
+                }
+                if (callee == null) {
+                    continue;
+                }
+
+                Map<String, Object> item = new HashMap<>();
+                item.put("name", callee.getName());
+                item.put("address", callee.getEntryPoint().toString());
+                item.put("call_site", instruction.getAddress().toString());
+                item.put("type", ref.getReferenceType().toString());
+                callees.add(item);
+            }
+        }
+
+        int endIndex = Math.min(callees.size(), offset + limit);
+        List<Map<String, Object>> page = offset < callees.size() ? callees.subList(offset, endIndex) : new ArrayList<>();
+
+        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            .success(true)
+            .result(page);
+
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("size", callees.size());
+        metadata.put("offset", offset);
+        metadata.put("limit", limit);
+        builder.metadata(metadata);
+
+        String functionPath = "/functions/" + function.getEntryPoint();
+        String basePath = functionPath + "/callees";
+        builder.addLink("self", basePath + "?offset=" + offset + "&limit=" + limit);
+        builder.addLink("function", functionPath);
+        if (endIndex < callees.size()) {
+            builder.addLink("next", basePath + "?offset=" + endIndex + "&limit=" + limit);
+        }
+        if (offset > 0) {
+            int prevOffset = Math.max(0, offset - limit);
+            builder.addLink("prev", basePath + "?offset=" + prevOffset + "&limit=" + limit);
+        }
+
+        sendJsonResponse(exchange, builder.build(), 200);
+    }
+
+    /**
+     * Handle requests to compute a normalized function hash.
+     */
+    private void handleFunctionHash(HttpExchange exchange, Function function) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+            return;
+        }
+
+        Program program = getCurrentProgram();
+        if (program == null) {
+            sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+            return;
+        }
+
+        String hash;
+        try {
+            hash = computeNormalizedFunctionHash(program, function);
+        } catch (Exception e) {
+            sendErrorResponse(exchange, 500, "Failed to compute function hash: " + e.getMessage(), "HASH_FAILED");
+            return;
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("name", function.getName());
+        result.put("address", function.getEntryPoint().toString());
+        result.put("algorithm", "SHA-256");
+        result.put("hash", hash);
+
+        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            .success(true)
+            .result(result);
+
+        String functionPath = "/functions/" + function.getEntryPoint();
+        builder.addLink("self", functionPath + "/hash");
+        builder.addLink("function", functionPath);
+        builder.addLink("decompile", functionPath + "/decompile");
+        builder.addLink("disassembly", functionPath + "/disassembly");
+
+        sendJsonResponse(exchange, builder.build(), 200);
+    }
+
+    private String computeNormalizedFunctionHash(Program program, Function function)
+        throws NoSuchAlgorithmException {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        ghidra.program.model.listing.Listing listing = program.getListing();
+        ghidra.program.model.listing.InstructionIterator iterator = listing.getInstructions(function.getBody(), true);
+
+        StringBuilder normalized = new StringBuilder();
+
+        while (iterator.hasNext()) {
+            ghidra.program.model.listing.Instruction instruction = iterator.next();
+            normalized.append(instruction.getMnemonicString()).append('|');
+
+            int operandCount = instruction.getNumOperands();
+            normalized.append(operandCount).append('|');
+            for (int i = 0; i < operandCount; i++) {
+                normalized.append(instruction.getOperandType(i)).append(',');
+            }
+
+            if (instruction.getFlowType() != null) {
+                normalized.append('|').append(instruction.getFlowType().toString());
+            }
+            normalized.append('\n');
+        }
+
+        byte[] hashBytes = digest.digest(normalized.toString().getBytes(StandardCharsets.UTF_8));
+        StringBuilder hex = new StringBuilder(hashBytes.length * 2);
+        for (byte b : hashBytes) {
+            hex.append(String.format("%02x", b));
+        }
+        return hex.toString();
+    }
+
+    /**
      * Handle requests to update a function variable
      */
     private void handleUpdateVariable(HttpExchange exchange, Function function, String variableName) throws IOException {
@@ -1335,19 +1693,19 @@ public class FunctionEndpoints extends AbstractEndpoint {
             Map<String, String> params = parseJsonPostParams(exchange);
             String newName = params.get("name");
             String newDataType = params.get("data_type");
-            
+
             if (newName == null && newDataType == null) {
                 sendErrorResponse(exchange, 400, "Missing update parameters - name or data_type required", "MISSING_PARAMETER");
                 return;
             }
-            
+
             // Use transaction to update variable
             Program program = getCurrentProgram();
             if (program == null) {
                 sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                 return;
             }
-            
+
             // Get DecompileResults — prefer cache
             DecompilerCache cache = getDecompilerCache();
             DecompileResults decompResults;
@@ -1394,7 +1752,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             if (cache != null) {
                 cache.invalidate(function.getEntryPoint());
             }
-            
+
             if (success) {
                 // Create a successful response
                 Map<String, Object> result = new HashMap<>();
@@ -1402,11 +1760,11 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 result.put("function", function.getName());
                 result.put("address", function.getEntryPoint().toString());
                 result.put("message", "Variable renamed successfully");
-                
+
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
                     .result(result);
-                
+
                 sendJsonResponse(exchange, builder.build(), 200);
             } else {
                 sendErrorResponse(exchange, 404, "Function resource not found: variables/" + variableName, "RESOURCE_NOT_FOUND");
@@ -1424,16 +1782,16 @@ public class FunctionEndpoints extends AbstractEndpoint {
         if (program == null) {
             return null;
         }
-        
+
         for (Function f : program.getFunctionManager().getFunctions(true)) {
             if (f.getName().equals(name)) {
                 return f;
             }
         }
-        
+
         return null;
     }
-    
+
     private Function findFunctionByAddress(String addressString) {
         Program program = getCurrentProgram();
         if (program == null) {
@@ -1460,25 +1818,25 @@ public class FunctionEndpoints extends AbstractEndpoint {
             .name(function.getName())
             .address(function.getEntryPoint().toString())
             .signature(function.getSignature().getPrototypeString());
-        
+
         // Add return type
         if (function.getReturnType() != null) {
             builder.returnType(function.getReturnType().getName());
         }
-        
+
         // Add calling convention
         if (function.getCallingConventionName() != null) {
             builder.callingConvention(function.getCallingConventionName());
         }
-        
+
         // Add namespace
         if (function.getParentNamespace() != null) {
             builder.namespace(function.getParentNamespace().getName());
         }
-        
+
         // Add external flag
         builder.isExternal(function.isExternal());
-        
+
         // Add parameters
         for (int i = 0; i < function.getParameterCount(); i++) {
             ghidra.program.model.listing.Parameter param = function.getParameter(i);
@@ -1488,10 +1846,10 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 .ordinal(i)
                 .storage(param.getRegister() != null ? param.getRegister().getName() : "stack")
                 .build();
-            
+
             builder.addParameter(paramInfo);
         }
-        
+
         return builder.build();
     }
 }

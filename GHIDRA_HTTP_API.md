@@ -381,6 +381,28 @@ Represents functions within the current program.
   ```
 - **`GET /functions/{address}/variables`**: List local variables defined within the function. Supports searching by name.
 - **`PATCH /functions/{address}/variables/{variable_name}`**: Modify a local variable (rename, change type). Requires `name` and/or `type` in the payload.
+- **`GET /functions/{address}/comments`**: Get comment information at function scope and entry point. Returns `plate`, `decompiler_comment`, `disassembly_comment`, and `eol_comment`.
+- **`PATCH /functions/{address}/comments`**: Set one or more comment types for a function.
+  - Request Payload fields (all optional, at least one required):
+    - `plate`: Function plate comment.
+    - `decompiler_comment`: Pre-comment at function entry (decompiler-friendly).
+    - `disassembly_comment`: EOL comment at function entry.
+    - `eol_comment`: Alias for setting EOL comment at function entry.
+- **`DELETE /functions/{address}/comments`**: Clear comments for a function.
+  - Query Parameters:
+    - `?type=[all|plate|decompiler|disassembly|eol]` (default: `all`)
+- **`GET /functions/{address}/callers`**: List functions that call the specified function. Supports pagination (`?offset=`, `?limit=`).
+- **`GET /functions/{address}/callees`**: List functions called by the specified function. Supports pagination (`?offset=`, `?limit=`).
+- **`GET /functions/{address}/hash`**: Compute a normalized SHA-256 hash for the function body, suitable for cross-binary matching where raw addresses may differ.
+  ```json
+  // Example Response
+  "result": {
+    "name": "process_data",
+    "address": "0x4010a0",
+    "algorithm": "SHA-256",
+    "hash": "e3b0c44298fc1c149afbf4c8996fb924..."
+  }
+  ```
 
 ### 5. Symbols & Labels
 
