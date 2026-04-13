@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Added `scripts/build_release.sh` to build versioned plugin and complete release zip archives locally.
+- Added SHA-256 checksum generation for release artifacts.
+
+### Changed
+- GitHub Actions can now build release-labeled zip assets on manual dispatch and publish them on tag builds.
+- Release zip filenames now use an explicit `release.label`, making GitHub release assets predictable for downloads and installation.
+
 ## [2.0.0] - 2025-11-11
 
 ### Added

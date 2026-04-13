@@ -25,7 +25,9 @@
     <maven.install.skip>true</maven.install.skip>
     <maven.build.timestamp.format>yyyyMMdd-HHmmss</maven.build.timestamp.format>
     <revision>dev</revision>
-    <inner.zip.filename>GhydraMCP-${git.commit.id.describe}-${maven.build.timestamp}.zip</inner.zip.filename>
+    <release.label>${git.commit.id.abbrev}-${maven.build.timestamp}</release.label>
+    <plugin.zip.filename>GhydraMCP-${release.label}.zip</plugin.zip.filename>
+    <complete.zip.filename>GhydraMCP-Complete-${release.label}.zip</complete.zip.filename>
   </properties>
 
   <dependencies>
@@ -99,6 +101,7 @@
   </dependencies>
 
   <build>
+    <finalName>GhydraMCP</finalName>
     <resources>
       <resource>
         <directory>src/main/resources</directory>
@@ -154,15 +157,14 @@
             </manifest>
             <manifestEntries>
               <Implementation-Title>GhydraMCP</Implementation-Title>
-              <Implementation-Version>${git.commit.id.abbrev}-${maven.build.timestamp}</Implementation-Version>
+              <Implementation-Version>${release.label}</Implementation-Version>
               <Plugin-Class>eu.starsong.ghidra.GhydraMCP</Plugin-Class>
               <Plugin-Name>GhydraMCP</Plugin-Name>
-              <Plugin-Version>${git.commit.id.abbrev}-${maven.build.timestamp}</Plugin-Version>
+              <Plugin-Version>${release.label}</Plugin-Version>
               <Plugin-Author>LaurieWired, Teal Bauer</Plugin-Author>
               <Plugin-Description>Expose multiple Ghidra tools to MCP servers with variable management</Plugin-Description>
             </manifestEntries>
           </archive>
-          <finalName>GhydraMCP</finalName>
           <excludes>
             <exclude>**/App.class</exclude>
           </excludes>
@@ -187,7 +189,7 @@
               <descriptors>
                 <descriptor>src/assembly/ghidra-extension.xml</descriptor>
               </descriptors>
-              <finalName>GhydraMCP-${git.commit.id.describe}-${maven.build.timestamp}</finalName>
+              <finalName>GhydraMCP-${release.label}</finalName>
               <appendAssemblyId>false</appendAssemblyId>
             </configuration>
           </execution>
@@ -203,7 +205,7 @@
               <descriptors>
                 <descriptor>src/assembly/complete-package.xml</descriptor>
               </descriptors>
-              <finalName>GhydraMCP-Complete-${git.commit.id.describe}-${maven.build.timestamp}</finalName>
+              <finalName>GhydraMCP-Complete-${release.label}</finalName>
               <appendAssemblyId>false</appendAssemblyId>
             </configuration>
           </execution>

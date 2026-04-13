@@ -42,20 +42,27 @@ GhydraMCP consists of two main components:
 git clone https://github.com/starsong-consulting/GhydraMCP.git
 cd GhydraMCP
 
-# Build the project
-mvn clean package
+# Build release archives
+./scripts/build_release.sh
 ```
 
 This creates:
-- `target/GhydraMCP-[version].zip` - The Ghidra plugin only
-- `target/GhydraMCP-Complete-[version].zip` - Complete package with plugin and bridge script
+- `target/GhydraMCP-[label].zip` - The Ghidra plugin only
+- `target/GhydraMCP-Complete-[label].zip` - Complete package with plugin and bridge script
+- `target/GhydraMCP-[label]-SHA256SUMS.txt` - SHA-256 checksums for both zip files
+
+For a release build with stable GitHub-ready filenames, pass the release tag explicitly:
+
+```bash
+./scripts/build_release.sh --label v2.2.0
+```
 
 ### Installing for Development
 
 1. Build the project as described above
 2. In Ghidra, go to `File` -> `Install Extensions`
 3. Click the `+` button
-4. Select the `GhydraMCP-[version].zip` file
+4. Select the `GhydraMCP-vX.Y.Z.zip` file
 5. Restart Ghidra
 6. Enable the plugin in `File` -> `Configure` -> `Developer`
 
@@ -76,6 +83,8 @@ uv pip install mcp==1.6.0 requests==2.32.3
 ## Versioning
 
 GhydraMCP follows semantic versioning (SemVer) and uses explicit API versions:
+
+GitHub releases are built from version tags in the form `vX.Y.Z`. The workflow uses that tag as the zip filename label so release assets are published as `GhydraMCP-vX.Y.Z.zip` and `GhydraMCP-Complete-vX.Y.Z.zip`.
 
 ### Version Numbers
 

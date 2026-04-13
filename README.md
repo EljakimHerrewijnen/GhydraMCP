@@ -127,12 +127,12 @@ GhydraMCP version 2.2.0 provides a comprehensive set of reverse engineering capa
 - MCP [SDK](https://github.com/modelcontextprotocol/python-sdk)
 
 ## Ghidra
-First, download the latest [release](https://github.com/teal-bauer/GhydraMCP/releases) from this repository. The "Complete" artifact contains the zipped Ghidra plugin and the Python MCP bridge. Unpack the outer archive, then, add the plugin to Ghidra:
+First, download the latest [release](https://github.com/starsong-consulting/GhydraMCP/releases) from this repository. The `GhydraMCP-Complete-vX.Y.Z.zip` artifact contains the zipped Ghidra plugin and the Python MCP bridge. Unpack the outer archive, then add the plugin to Ghidra:
 
 1. Run Ghidra
 2. Select `File` -> `Install Extensions`
 3. Click the `+` button
-4. Select the `GhydraMCP-[version].zip` file from the downloaded release
+4. Select the `GhydraMCP-vX.Y.Z.zip` file from the downloaded release
 5. Restart Ghidra
 6. Make sure the GhydraMCPPlugin is enabled in `File` -> `Configure` -> `Developer`
 
@@ -652,32 +652,38 @@ Tests the MCP bridge functionality:
 
 # Building from Source
 
-You can build different artifacts with Maven:
+The repository includes a release build script that produces the same versioned zip files used by GitHub releases.
 
-## Build Everything (Default)
-Build both the Ghidra plugin and the complete package:
+## Build Release Archives
+Build both the Ghidra plugin zip and the complete release zip:
 
 ```
-mvn clean package
+./scripts/build_release.sh
 ```
 
 This creates:
-- `target/GhydraMCP-[version].zip` - The Ghidra plugin only
-- `target/GhydraMCP-Complete-[version].zip` - Complete package with plugin and bridge script
+- `target/GhydraMCP-[label].zip` - The Ghidra plugin only
+- `target/GhydraMCP-Complete-[label].zip` - Complete package with plugin and bridge script
+- `target/GhydraMCP-[label]-SHA256SUMS.txt` - SHA-256 checksums for both zip files
 
-## Build Ghidra Plugin Only
-If you only need the Ghidra plugin:
-
-```
-mvn clean package -P plugin-only
-```
-
-## Build Complete Package Only
-If you only need the combined package:
+By default, the label is `<git-sha>-<utc-timestamp>`. To build release-grade artifacts with a predictable filename, pass the release tag explicitly:
 
 ```
-mvn clean package -P complete-only
+./scripts/build_release.sh --label v2.2.0
 ```
+
+If you only need the raw Maven package step, it still works and uses the same filename convention:
+
+```
+mvn clean package -Drelease.label=v2.2.0
+```
+
+## Build on GitHub
+
+GitHub Actions now supports both automated and manual release packaging:
+
+- Pushing a `v*` tag builds the release zip files, generates checksums, and publishes a GitHub release.
+- Running the `Build Ghidra Plugin` workflow manually lets you choose a `release_label` and optionally publish a release without pushing a tag first.
 
 The Ghidra plugin includes these files required for Ghidra to recognize the extension:
 - lib/GhydraMCP.jar

@@ -26,7 +26,7 @@
     <files>
         <!-- Include the inner ZIP directly from target -->
         <file>
-            <source>${project.build.directory}/${inner.zip.filename}</source>
+            <source>${project.build.directory}/${plugin.zip.filename}</source>
             <outputDirectory>/</outputDirectory>
             <fileMode>0644</fileMode>
         </file>
