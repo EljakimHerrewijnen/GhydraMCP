@@ -1,6 +1,5 @@
 package eu.starsong.ghidra.endpoints;
 
-import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import eu.starsong.ghidra.api.ResponseBuilder;
@@ -14,9 +13,13 @@ import ghidra.app.decompiler.DecompileResults;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressFactory;
+import ghidra.program.model.data.DataType;
+import ghidra.program.model.data.DataTypeManager;
+import ghidra.program.model.data.PointerDataType;
+import ghidra.program.model.data.Structure;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.CodeUnit;
-import ghidra.program.model.listing.Parameter;
+import ghidra.program.model.listing.Variable;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
@@ -32,7 +35,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.io.IOException;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -436,12 +438,16 @@ public class FunctionEndpoints extends AbstractEndpoint {
 
         if (signature != null && !signature.isEmpty()) {
             try {
-                boolean success = TransactionHelper.executeInTransaction(program, "Set function signature for " + function.getName(), () -> {
-                    return GhidraUtil.setFunctionSignature(function, signature);
-                });
+                GhidraUtil.SignatureUpdateResult signatureResult = TransactionHelper.executeInTransaction(
+                    program,
+                    "Set function signature for " + function.getName(),
+                    () -> GhidraUtil.setFunctionSignatureDetailed(function, signature)
+                );
 
-                if (!success) {
-                    sendErrorResponse(exchange, 400, "Failed to set function signature: invalid signature format", "SIGNATURE_FAILED");
+                if (!signatureResult.isSuccess()) {
+                    sendErrorResponse(exchange, 400,
+                        "Failed to set function signature: " + signatureResult.getMessage(),
+                        "SIGNATURE_FAILED");
                     return;
                 }
                 changed = true;
@@ -843,12 +849,32 @@ public class FunctionEndpoints extends AbstractEndpoint {
         } else if (resource.equals("hash")) {
             handleFunctionHash(exchange, function);
         } else if (resource.startsWith("variables/")) {
-            // Handle variable operations
-            String variableName = resource.substring("variables/".length());
-            if ("PATCH".equals(exchange.getRequestMethod())) {
-                handleUpdateVariable(exchange, function, variableName);
+            // Handle variable operations with optional nested variable sub-resources.
+            String variablePath = resource.substring("variables/".length());
+            String variableName = variablePath;
+            String variableResource = null;
+
+            if (variablePath.contains("/")) {
+                int slashIdx = variablePath.indexOf('/');
+                variableName = variablePath.substring(0, slashIdx);
+                variableResource = variablePath.substring(slashIdx + 1);
+            }
+
+            String method = exchange.getRequestMethod();
+            if (variableResource == null || variableResource.isEmpty()) {
+                if ("PATCH".equals(method)) {
+                    handleUpdateVariable(exchange, function, variableName);
+                } else {
+                    sendErrorResponse(exchange, 405, "Method not allowed for variable operations", "METHOD_NOT_ALLOWED");
+                }
+            } else if ("struct".equals(variableResource)) {
+                if ("PATCH".equals(method) || "POST".equals(method)) {
+                    handleApplyStructToVariable(exchange, function, variableName);
+                } else {
+                    sendErrorResponse(exchange, 405, "Method not allowed for struct application", "METHOD_NOT_ALLOWED");
+                }
             } else {
-                sendErrorResponse(exchange, 405, "Method not allowed for variable operations", "METHOD_NOT_ALLOWED");
+                sendErrorResponse(exchange, 404, "Variable resource not found: " + variableResource, "RESOURCE_NOT_FOUND");
             }
         } else {
             sendErrorResponse(exchange, 404, "Function resource not found: " + resource, "RESOURCE_NOT_FOUND");
@@ -1689,81 +1715,80 @@ public class FunctionEndpoints extends AbstractEndpoint {
      */
     private void handleUpdateVariable(HttpExchange exchange, Function function, String variableName) throws IOException {
         try {
-            // Parse the request body to get the update parameters
             Map<String, String> params = parseJsonPostParams(exchange);
             String newName = params.get("name");
             String newDataType = params.get("data_type");
+            String comment = params.get("comment");
 
-            if (newName == null && newDataType == null) {
-                sendErrorResponse(exchange, 400, "Missing update parameters - name or data_type required", "MISSING_PARAMETER");
+            if (newName == null && newDataType == null && comment == null) {
+                sendErrorResponse(exchange, 400, "Missing update parameters - name, data_type, or comment required", "MISSING_PARAMETER");
                 return;
             }
 
-            // Use transaction to update variable
             Program program = getCurrentProgram();
             if (program == null) {
                 sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                 return;
             }
 
-            // Get DecompileResults — prefer cache
+            if (comment != null) {
+                sendErrorResponse(exchange, 501,
+                    "Variable comments are not yet supported; use name and data_type updates for now",
+                    "NOT_IMPLEMENTED");
+                return;
+            }
+
+            DataType resolvedDataType = null;
+            if (newDataType != null && !newDataType.isBlank()) {
+                resolvedDataType = GhidraUtil.resolveDataType(program, newDataType);
+                if (resolvedDataType == null) {
+                    sendErrorResponse(exchange, 404, "Data type not found: " + newDataType, "DATATYPE_NOT_FOUND");
+                    return;
+                }
+            }
+
             DecompilerCache cache = getDecompilerCache();
-            DecompileResults decompResults;
+            HighFunction highFunc = null;
             if (cache != null) {
-                decompResults = cache.getDecompileResults(function, 30);
+                DecompileResults decompResults = cache.getDecompileResults(function, 30);
+                if (decompResults != null && decompResults.decompileCompleted()) {
+                    highFunc = decompResults.getHighFunction();
+                }
             } else {
                 DecompInterface decomp = new DecompInterface();
                 try {
                     decomp.openProgram(program);
-                    decompResults = decomp.decompileFunction(function, 30, new ConsoleTaskMonitor());
+                    DecompileResults decompResults = decomp.decompileFunction(function, 30, new ConsoleTaskMonitor());
+                    if (decompResults != null && decompResults.decompileCompleted()) {
+                        highFunc = decompResults.getHighFunction();
+                    }
                 } finally {
                     decomp.dispose();
                 }
             }
 
-            if (decompResults == null || !decompResults.decompileCompleted()) {
-                sendErrorResponse(exchange, 500, "Decompilation failed for " + function.getName(), "DECOMPILE_FAILED");
-                return;
-            }
+            final String targetName = (newName != null && !newName.isBlank()) ? newName : null;
+            final DataType targetDataType = resolvedDataType;
+            final HighFunction targetHighFunction = highFunc;
 
-            HighFunction highFunc = decompResults.getHighFunction();
-            if (highFunc == null) {
-                sendErrorResponse(exchange, 500, "No high function available", "DECOMPILE_FAILED");
-                return;
-            }
-
-            boolean success = TransactionHelper.executeInTransaction(program, "Update variable " + variableName + " in " + function.getName(), () -> {
+            Map<String, Object> updateResult = TransactionHelper.executeInTransaction(program,
+                "Update variable " + variableName + " in " + function.getName(), () -> {
                 try {
-                    for (Iterator<HighSymbol> symbolIter = highFunc.getLocalSymbolMap().getSymbols(); symbolIter.hasNext();) {
-                        HighSymbol symbol = symbolIter.next();
-                        if (symbol.getName().equals(variableName)) {
-                            HighFunctionDBUtil.updateDBVariable(symbol, newName, null, SourceType.USER_DEFINED);
-                            return true;
-                        }
-                    }
-                    return false;
+                    return updateFunctionVariable(function, variableName, targetName, targetDataType, targetHighFunction);
                 } catch (Exception e) {
                     Msg.error(this, "Error updating variable: " + e.getMessage(), e);
-                    return false;
+                    throw e;
                 }
             });
 
-            // Invalidate cache entry after write
             if (cache != null) {
                 cache.invalidate(function.getEntryPoint());
             }
 
-            if (success) {
-                // Create a successful response
-                Map<String, Object> result = new HashMap<>();
-                result.put("name", newName != null ? newName : variableName);
-                result.put("function", function.getName());
-                result.put("address", function.getEntryPoint().toString());
-                result.put("message", "Variable renamed successfully");
-
+            if (updateResult != null) {
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
-                    .result(result);
+                    .result(updateResult);
 
                 sendJsonResponse(exchange, builder.build(), 200);
             } else {
@@ -1772,6 +1797,177 @@ public class FunctionEndpoints extends AbstractEndpoint {
         } catch (Exception e) {
             sendErrorResponse(exchange, 500, "Error processing variable update request: " + e.getMessage(), "INTERNAL_ERROR");
         }
+    }
+
+    /**
+     * Apply a struct (or pointer-to-struct) type to a function variable.
+     *
+     * Endpoint:
+     *   PATCH/POST /functions/{address}/variables/{variableName}/struct
+     *   PATCH/POST /functions/by-name/{name}/variables/{variableName}/struct
+     *
+     * Body params:
+     *   struct_name (required): struct type name/path
+     *   as_pointer (optional, default true): apply struct* when true, struct when false
+     *   new_name (optional): rename variable while applying type
+     */
+    private void handleApplyStructToVariable(HttpExchange exchange, Function function, String variableName) throws IOException {
+        try {
+            Map<String, String> params = parseJsonPostParams(exchange);
+            String structName = params.get("struct_name");
+            String asPointerStr = params.getOrDefault("as_pointer", "true");
+            String newName = params.get("new_name");
+
+            if (structName == null || structName.isBlank()) {
+                sendErrorResponse(exchange, 400, "Missing required parameter: struct_name", "MISSING_PARAMETER");
+                return;
+            }
+
+            Program program = getCurrentProgram();
+            if (program == null) {
+                sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+                return;
+            }
+
+            boolean asPointer = Boolean.parseBoolean(asPointerStr);
+
+            DataType structType = resolveStructDataType(program, structName);
+            if (structType == null || !(structType instanceof Structure)) {
+                sendErrorResponse(exchange, 404, "Struct not found: " + structName, "DATATYPE_NOT_FOUND");
+                return;
+            }
+
+            DataType targetType = structType;
+            if (asPointer) {
+                DataType pointerCandidate = GhidraUtil.resolveDataType(program, structType.getName() + " *");
+                if (pointerCandidate != null) {
+                    targetType = pointerCandidate;
+                } else {
+                    targetType = new PointerDataType(structType);
+                }
+            }
+
+            final String targetName = (newName != null && !newName.isBlank()) ? newName : null;
+            final DataType finalTargetType = targetType;
+
+            DecompilerCache cache = getDecompilerCache();
+            HighFunction highFunc = null;
+            if (cache != null) {
+                DecompileResults decompResults = cache.getDecompileResults(function, 30);
+                if (decompResults != null && decompResults.decompileCompleted()) {
+                    highFunc = decompResults.getHighFunction();
+                }
+            }
+
+            final HighFunction finalHighFunc = highFunc;
+
+            Map<String, Object> updateResult = TransactionHelper.executeInTransaction(program,
+                "Apply struct type to variable " + variableName + " in " + function.getName(), () ->
+                    updateFunctionVariable(function, variableName, targetName, finalTargetType, finalHighFunc)
+            );
+
+            if (cache != null) {
+                cache.invalidate(function.getEntryPoint());
+            }
+
+            if (updateResult == null) {
+                sendErrorResponse(exchange, 404, "Function resource not found: variables/" + variableName, "RESOURCE_NOT_FOUND");
+                return;
+            }
+
+            updateResult.put("applied_struct", structType.getName());
+            updateResult.put("applied_as_pointer", asPointer);
+
+            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                .success(true)
+                .result(updateResult);
+            sendJsonResponse(exchange, builder.build(), 200);
+        } catch (Exception e) {
+            sendErrorResponse(exchange, 500, "Error processing struct application: " + e.getMessage(), "INTERNAL_ERROR");
+        }
+    }
+
+    private DataType resolveStructDataType(Program program, String structName) {
+        DataType direct = GhidraUtil.resolveDataType(program, structName);
+        if (direct instanceof Structure) {
+            return direct;
+        }
+
+        DataTypeManager dtm = program.getDataTypeManager();
+        final DataType[] found = new DataType[1];
+        dtm.getAllDataTypes().forEachRemaining(dt -> {
+            if (found[0] == null && dt instanceof Structure) {
+                if (structName.equals(dt.getName()) || structName.equals(dt.getPathName())) {
+                    found[0] = dt;
+                }
+            }
+        });
+        return found[0];
+    }
+
+    private Map<String, Object> updateFunctionVariable(Function function,
+                                                       String variableName,
+                                                       String targetName,
+                                                       DataType targetDataType,
+                                                       HighFunction highFunc) throws Exception {
+        if (highFunc != null) {
+            for (Iterator<HighSymbol> symbolIter = highFunc.getLocalSymbolMap().getSymbols(); symbolIter.hasNext();) {
+                HighSymbol symbol = symbolIter.next();
+                if (symbol.getName().equals(variableName)) {
+                    String effectiveName = targetName != null ? targetName : symbol.getName();
+                    HighFunctionDBUtil.updateDBVariable(symbol, effectiveName, targetDataType, SourceType.USER_DEFINED);
+                    return buildVariableUpdateResult(function, variableName, effectiveName,
+                        targetDataType != null ? targetDataType.getName() : symbol.getDataType().getName(),
+                        targetName != null, targetDataType != null);
+                }
+            }
+        }
+
+        for (Variable variable : function.getAllVariables()) {
+            if (!variable.getName().equals(variableName)) {
+                continue;
+            }
+
+            String effectiveName = targetName != null ? targetName : variable.getName();
+            if (targetName != null && !targetName.equals(variable.getName())) {
+                variable.setName(targetName, SourceType.USER_DEFINED);
+            }
+            if (targetDataType != null) {
+                variable.setDataType(targetDataType, SourceType.USER_DEFINED);
+            }
+
+            return buildVariableUpdateResult(function, variableName, effectiveName,
+                targetDataType != null ? targetDataType.getName() : variable.getDataType().getName(),
+                targetName != null, targetDataType != null);
+        }
+
+        return null;
+    }
+
+    private Map<String, Object> buildVariableUpdateResult(Function function,
+                                                          String previousName,
+                                                          String effectiveName,
+                                                          String dataTypeName,
+                                                          boolean renamed,
+                                                          boolean retyped) {
+        Map<String, Object> result = new HashMap<>();
+        result.put("name", effectiveName);
+        result.put("previous_name", previousName);
+        result.put("data_type", dataTypeName);
+        result.put("function", function.getName());
+        result.put("address", function.getEntryPoint().toString());
+        result.put("message", buildVariableUpdateMessage(renamed, retyped));
+        return result;
+    }
+
+    private String buildVariableUpdateMessage(boolean renamed, boolean retyped) {
+        if (renamed && retyped) {
+            return "Variable name and data type updated successfully";
+        }
+        if (retyped) {
+            return "Variable data type updated successfully";
+        }
+        return "Variable renamed successfully";
     }
 
     /**

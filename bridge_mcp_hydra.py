@@ -264,6 +264,81 @@ def safe_delete(port: int, endpoint: str) -> dict:
     return _make_request("DELETE", port, endpoint)
 
 
+def _resolve_function_address(name: str, port: int) -> Union[str, dict]:
+    """Resolve function address by name using raw API response data."""
+    if not name:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Function name parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    response = safe_get(port, f"functions/by-name/{quote(name)}")
+    simplified = simplify_response(response)
+
+    if not isinstance(simplified, dict):
+        return {
+            "success": False,
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "Unexpected function lookup response type"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    if not simplified.get("success", False):
+        return simplified
+
+    func_result = simplified.get("result", {})
+    if not isinstance(func_result, dict):
+        return {
+            "success": False,
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "Unexpected function lookup result format"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    resolved_address = func_result.get("address")
+    if not resolved_address:
+        return {
+            "success": False,
+            "error": {
+                "code": "FUNCTION_NOT_FOUND",
+                "message": f"Unable to resolve function address for name: {name}"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    return resolved_address
+
+
+def _parse_hex_address(address: str) -> Optional[int]:
+    """Parse Ghidra-style address strings to integer offsets."""
+    if not isinstance(address, str):
+        return None
+
+    raw = address.strip()
+    if not raw:
+        return None
+
+    # Handle possible address space prefixes, e.g. ram:00401000
+    if ":" in raw:
+        raw = raw.split(":")[-1]
+
+    if raw.lower().startswith("0x"):
+        raw = raw[2:]
+
+    try:
+        return int(raw, 16)
+    except ValueError:
+        return None
+
+
 # ================= Text Formatters =================
 # Format API responses as plain text for efficient LLM consumption
 
@@ -589,11 +664,36 @@ def format_callgraph(response: dict, **kwargs) -> str:
         return format_error(response)
 
     result = response.get("result", {})
-    root = result.get("rootFunction", "???")
     nodes = result.get("nodes", [])
     edges = result.get("edges", [])
 
-    lines = [f"Call graph from {root}:", f"  {len(nodes)} functions, {len(edges)} calls", ""]
+    node_lookup = {}
+    for node in nodes:
+        node_id = node.get("id") or node.get("address") or node.get("name")
+        if not node_id:
+            continue
+        node_lookup[node_id] = {
+            "name": node.get("name") or node.get("displayName") or node_id,
+            "address": node.get("address") or node_id,
+        }
+
+    root_id = result.get("root_address") or result.get("root")
+    root_node = node_lookup.get(root_id, {
+        "name": result.get("root") or root_id or "???",
+        "address": result.get("root_address") or "???",
+    })
+
+    def describe_node(node_id: str) -> str:
+        node = node_lookup.get(node_id)
+        if node is None:
+            return node_id or "???"
+        return f"{node['name']} ({node['address']})"
+
+    lines = [
+        f"Call graph from {root_node['name']} ({root_node['address']}):",
+        f"  {len(nodes)} functions, {len(edges)} calls",
+        ""
+    ]
 
     calls = {}
     for edge in edges:
@@ -607,9 +707,9 @@ def format_callgraph(response: dict, **kwargs) -> str:
         if seen is None:
             seen = set()
         if fn in seen:
-            return [f"{'  ' * indent}{fn} (recursive)"]
+            return [f"{'  ' * indent}{describe_node(fn)} (recursive)"]
         seen.add(fn)
-        result_lines = [f"{'  ' * indent}{fn}"]
+        result_lines = [f"{'  ' * indent}{describe_node(fn)}"]
         if fn in calls and indent < 3:
             for callee in calls[fn][:10]:
                 result_lines.extend(show_calls(callee, indent + 1, seen.copy()))
@@ -617,7 +717,7 @@ def format_callgraph(response: dict, **kwargs) -> str:
                 result_lines.append(f"{'  ' * (indent + 1)}... and {len(calls[fn]) - 10} more")
         return result_lines
 
-    lines.extend(show_calls(root))
+    lines.extend(show_calls(root_id))
     return "\n".join(lines)
 
 
@@ -780,6 +880,37 @@ def format_segments_list(response: dict, offset: int = 0, limit: int = 100, **kw
     return "\n".join(lines)
 
 
+def format_segments_map(response: dict, address: str = None, **kwargs) -> str:
+    """Format segment map output as text."""
+    mapped = response.get("result", {}) if isinstance(response, dict) else {}
+    segments = mapped.get("segments", []) if isinstance(mapped, dict) else []
+    count = mapped.get("count", len(segments)) if isinstance(mapped, dict) else len(segments)
+
+    lines = [f"Segment map ({count} segments):", ""]
+
+    for seg in segments:
+        name = seg.get("name", "???")
+        start = seg.get("start", "???")
+        end = seg.get("end", "???")
+        size = seg.get("size", 0)
+        perms = seg.get("permissions", "---")
+        init = "init" if seg.get("initialized") else "uninit"
+        lines.append(f"  {name:<16}  {start}-{end}  {size:>8} bytes  {perms}  {init}")
+
+    if address is not None:
+        lines.append("")
+        matched = mapped.get("segment") if isinstance(mapped, dict) else None
+        if isinstance(matched, dict):
+            lines.append(
+                f"Address {address} is in segment {matched.get('name', '???')} "
+                f"({matched.get('start', '???')}-{matched.get('end', '???')})"
+            )
+        else:
+            lines.append(f"Address {address} is not inside any mapped segment")
+
+    return "\n".join(lines)
+
+
 def format_namespaces_list(response: dict, offset: int = 0, limit: int = 100, **kwargs) -> str:
     """Format namespaces list as text"""
     items = response.get("result", [])
@@ -862,6 +993,7 @@ FORMATTERS = {
     "symbols_imports": format_imports_exports,
     "symbols_exports": format_imports_exports,
     "segments_list": format_segments_list,
+    "segments_map": format_segments_map,
     "namespaces_list": format_namespaces_list,
     "variables_list": format_variables_list,
     "datatypes_list": format_datatypes_list,
@@ -2263,6 +2395,123 @@ def functions_get_variables(name: str = None, address: str = None, port: int = N
 
 @mcp.tool()
 @text_output
+def functions_update_variable(variable_name: str, new_name: str = None, data_type: str = None,
+                              name: str = None, address: str = None, port: int = None) -> dict:
+    """Rename or retype a function parameter/local variable.
+
+    Args:
+        variable_name: Existing parameter/local variable name to update
+        new_name: New variable name (optional)
+        data_type: New data type name to apply (optional)
+        name: Function name (mutually exclusive with address)
+        address: Function address in hex format (mutually exclusive with name)
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Operation result with updated variable details
+    """
+    if not variable_name or not (name or address):
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "variable_name and either name or address are required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    if new_name is None and data_type is None:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "At least one of new_name or data_type is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+    endpoint = f"functions/{address}/variables/{quote(variable_name)}" if address else \
+        f"functions/by-name/{quote(name)}/variables/{quote(variable_name)}"
+
+    payload = {}
+    if new_name is not None:
+        payload["name"] = new_name
+    if data_type is not None:
+        payload["data_type"] = data_type
+
+    response = safe_patch(port, endpoint, payload)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def functions_apply_struct(variable_name: str,
+                           struct_name: str,
+                           as_pointer: bool = True,
+                           new_name: str = None,
+                           name: str = None,
+                           address: str = None,
+                           port: int = None) -> dict:
+    """Apply a struct type to a function variable (GUI-like retyping workflow).
+
+    This mirrors the common Ghidra GUI operation "set variable data type to struct"
+    and supports applying either the raw struct type or a pointer-to-struct.
+
+    Args:
+        variable_name: Existing parameter/local variable name to update
+        struct_name: Struct type name/path to apply
+        as_pointer: Apply struct* when true, struct when false (default: True)
+        new_name: Optional new variable name
+        name: Function name (mutually exclusive with address)
+        address: Function address in hex format (mutually exclusive with name)
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Operation result with applied type details
+    """
+    if not variable_name or not struct_name or not (name or address):
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "variable_name, struct_name, and either name or address are required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+    endpoint = f"functions/{address}/variables/{quote(variable_name)}/struct" if address else \
+        f"functions/by-name/{quote(name)}/variables/{quote(variable_name)}/struct"
+    fallback_endpoint = f"functions/{address}/variables/{quote(variable_name)}" if address else \
+        f"functions/by-name/{quote(name)}/variables/{quote(variable_name)}"
+
+    payload = {
+        "struct_name": struct_name,
+        "as_pointer": str(as_pointer).lower()
+    }
+    if new_name is not None:
+        payload["new_name"] = new_name
+
+    response = safe_patch(port, endpoint, payload)
+
+    if not response.get("success", False):
+        error = response.get("error", {})
+        error_code = error.get("code") if isinstance(error, dict) else None
+
+        if error_code in {"MISSING_PARAMETER", "METHOD_NOT_ALLOWED", "NOT_FOUND", "HTTP_404"}:
+            fallback_payload = {
+                "data_type": f"{struct_name} *" if as_pointer else struct_name
+            }
+            if new_name is not None:
+                fallback_payload["name"] = new_name
+
+            response = safe_patch(port, fallback_endpoint, fallback_payload)
+
+    return simplify_response(response)
+
+@mcp.tool()
+@text_output
 def functions_get_hash(name: str = None, address: str = None, port: int = None) -> dict:
     """Get SHA-256 normalized opcode hash for a function.
 
@@ -2289,19 +2538,9 @@ def functions_get_hash(name: str = None, address: str = None, port: int = None) 
     if address:
         endpoint = f"functions/{address}/hash"
     else:
-        function = functions_get(name=name, port=port)
-        if not function.get("success", False):
-            return function
-        resolved_address = function.get("result", {}).get("address")
-        if not resolved_address:
-            return {
-                "success": False,
-                "error": {
-                    "code": "FUNCTION_NOT_FOUND",
-                    "message": f"Unable to resolve function address for name: {name}"
-                },
-                "timestamp": int(time.time() * 1000)
-            }
+        resolved_address = _resolve_function_address(name, port)
+        if isinstance(resolved_address, dict):
+            return resolved_address
         endpoint = f"functions/{resolved_address}/hash"
 
     response = safe_get(port, endpoint)
@@ -2334,19 +2573,9 @@ def functions_get_comments(name: str = None, address: str = None, port: int = No
     if address:
         endpoint = f"functions/{address}/comments"
     else:
-        function = functions_get(name=name, port=port)
-        if not function.get("success", False):
-            return function
-        resolved_address = function.get("result", {}).get("address")
-        if not resolved_address:
-            return {
-                "success": False,
-                "error": {
-                    "code": "FUNCTION_NOT_FOUND",
-                    "message": f"Unable to resolve function address for name: {name}"
-                },
-                "timestamp": int(time.time() * 1000)
-            }
+        resolved_address = _resolve_function_address(name, port)
+        if isinstance(resolved_address, dict):
+            return resolved_address
         endpoint = f"functions/{resolved_address}/comments"
 
     response = safe_get(port, endpoint)
@@ -2466,19 +2695,9 @@ def functions_get_callers(name: str = None, address: str = None,
     if address:
         endpoint = f"functions/{address}/callers"
     else:
-        function = functions_get(name=name, port=port)
-        if not function.get("success", False):
-            return function
-        resolved_address = function.get("result", {}).get("address")
-        if not resolved_address:
-            return {
-                "success": False,
-                "error": {
-                    "code": "FUNCTION_NOT_FOUND",
-                    "message": f"Unable to resolve function address for name: {name}"
-                },
-                "timestamp": int(time.time() * 1000)
-            }
+        resolved_address = _resolve_function_address(name, port)
+        if isinstance(resolved_address, dict):
+            return resolved_address
         endpoint = f"functions/{resolved_address}/callers"
 
     response = safe_get(port, endpoint, {"offset": offset, "limit": limit})
@@ -2515,19 +2734,9 @@ def functions_get_callees(name: str = None, address: str = None,
     if address:
         endpoint = f"functions/{address}/callees"
     else:
-        function = functions_get(name=name, port=port)
-        if not function.get("success", False):
-            return function
-        resolved_address = function.get("result", {}).get("address")
-        if not resolved_address:
-            return {
-                "success": False,
-                "error": {
-                    "code": "FUNCTION_NOT_FOUND",
-                    "message": f"Unable to resolve function address for name: {name}"
-                },
-                "timestamp": int(time.time() * 1000)
-            }
+        resolved_address = _resolve_function_address(name, port)
+        if isinstance(resolved_address, dict):
+            return resolved_address
         endpoint = f"functions/{resolved_address}/callees"
 
     response = safe_get(port, endpoint, {"offset": offset, "limit": limit})
@@ -2643,6 +2852,73 @@ def memory_write(address: str, bytes_data: str, format: str = "hex", port: int =
 
     # Memory write is handled by ProgramEndpoints, not MemoryEndpoints
     response = safe_patch(port, f"programs/current/memory/{address}", payload)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def memory_map_add(name: str, address: str, size: int,
+                   readable: bool = True, writable: bool = False,
+                   executable: bool = False, initialized: bool = False,
+                   port: int = None) -> dict:
+    """Create a named memory block mapping at a specific address range.
+
+    Args:
+        name: Mapping/block name (e.g. device name)
+        address: Start address in hex format
+        size: Mapping size in bytes
+        readable: Read permission (default: True)
+        writable: Write permission (default: False)
+        executable: Execute permission (default: False)
+        initialized: Create initialized block instead of uninitialized (default: False)
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Created mapping information
+    """
+    if not name:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Name parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    if not address:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Address parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    if size is None or size <= 0:
+        return {
+            "success": False,
+            "error": {
+                "code": "INVALID_PARAMETER",
+                "message": "Size must be greater than 0"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+
+    payload = {
+        "name": name,
+        "address": address,
+        "size": str(size),
+        "readable": str(readable).lower(),
+        "writable": str(writable).lower(),
+        "executable": str(executable).lower(),
+        "initialized": str(initialized).lower(),
+    }
+
+    response = safe_post(port, "memory/blocks", payload)
     return simplify_response(response)
 
 @mcp.tool()
@@ -3406,6 +3682,328 @@ def project_open_file(path: str, port: int = None) -> dict:
     return simplify_response(response)
 
 
+@mcp.tool()
+@text_output
+def server_status(port: int = None) -> dict:
+    """Get Ghidra Server connection status for the current project.
+
+    Args:
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Server status including shared/connected flags
+    """
+    port = _get_instance_port(port)
+    response = safe_get(port, "server/status")
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_sync_file(path: str,
+                     comment: str = "Synced via GhydraMCP",
+                     auto_add: bool = True,
+                     keep_checked_out: bool = False,
+                     exclusive_checkout: bool = False,
+                     force: bool = False,
+                     fail_if_modified: bool = False,
+                     allow_merge: bool = True,
+                     port: int = None) -> dict:
+    """Sync a project file to remote Ghidra Server version control.
+
+    If the file is not yet under server version control and auto_add=True,
+    the file is added first, then checked out and checked in.
+
+    Args:
+        path: Domain file path in project (e.g., "/malware.exe")
+        comment: Check-in comment
+        auto_add: Add unversioned file to server automatically (default: True)
+        keep_checked_out: Keep checkout after sync (default: False)
+        exclusive_checkout: Request exclusive checkout (default: False)
+        force: Continue when checkout is not immediately available (default: False)
+        fail_if_modified: Fail pre-check if local changes are detected (default: False)
+        allow_merge: Hint to allow merge workflows (default: True)
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Sync operation result and status flags
+    """
+    if not path:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Path parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+    data = {
+        "path": path,
+        "comment": comment,
+        "auto_add": str(auto_add).lower(),
+        "keep_checked_out": str(keep_checked_out).lower(),
+        "exclusive_checkout": str(exclusive_checkout).lower(),
+        "force": str(force).lower(),
+        "fail_if_modified": str(fail_if_modified).lower(),
+        "allow_merge": str(allow_merge).lower()
+    }
+    response = safe_post(port, "server/version_control/sync", data)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_sync_current(comment: str = "Synced via GhydraMCP",
+                        auto_add: bool = True,
+                        keep_checked_out: bool = False,
+                        exclusive_checkout: bool = False,
+                        force: bool = False,
+                        fail_if_modified: bool = False,
+                        allow_merge: bool = True,
+                        port: int = None) -> dict:
+    """Sync the current program's DomainFile to remote Ghidra Server version control.
+
+    If the file is not yet under server version control and auto_add=True,
+    the file is added first, then checked out and checked in.
+
+    Args:
+        comment: Check-in comment
+        auto_add: Add unversioned file to server automatically (default: True)
+        keep_checked_out: Keep checkout after sync (default: False)
+        exclusive_checkout: Request exclusive checkout (default: False)
+        force: Continue when checkout is not immediately available (default: False)
+        fail_if_modified: Fail pre-check if local changes are detected (default: False)
+        allow_merge: Hint to allow merge workflows (default: True)
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Sync operation result for current program file
+    """
+    port = _get_instance_port(port)
+    data = {
+        "comment": comment,
+        "auto_add": str(auto_add).lower(),
+        "keep_checked_out": str(keep_checked_out).lower(),
+        "exclusive_checkout": str(exclusive_checkout).lower(),
+        "force": str(force).lower(),
+        "fail_if_modified": str(fail_if_modified).lower(),
+        "allow_merge": str(allow_merge).lower()
+    }
+    response = safe_post(port, "server/version_control/sync-current", data)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_sync_preflight(path: str = None,
+                          current: bool = False,
+                          auto_add: bool = True,
+                          port: int = None) -> dict:
+    """Dry-run/preflight for sync operations.
+
+    Args:
+        path: Domain file path in project (optional if current=True)
+        current: Use current program DomainFile when true
+        auto_add: Whether sync would auto-add unversioned file
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Planned sync actions and status flags
+    """
+    port = _get_instance_port(port)
+    params = {
+        "current": str(current).lower(),
+        "auto_add": str(auto_add).lower()
+    }
+    if path:
+        params["path"] = path
+    response = safe_get(port, "server/version_control/sync-preflight", params)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_sync_files(paths: list,
+                      comment: str = "Synced via GhydraMCP",
+                      auto_add: bool = True,
+                      keep_checked_out: bool = False,
+                      exclusive_checkout: bool = False,
+                      force: bool = False,
+                      fail_if_modified: bool = False,
+                      allow_merge: bool = True,
+                      continue_on_error: bool = True,
+                      port: int = None) -> dict:
+    """Bulk sync multiple project files to remote Ghidra Server version control.
+
+    Args:
+        paths: List of domain file paths (e.g., ["/a.exe", "/b.dll"])
+        comment: Check-in comment
+        auto_add: Add unversioned file to server automatically
+        keep_checked_out: Keep checkout after sync
+        exclusive_checkout: Request exclusive checkout
+        force: Continue when checkout is not immediately available
+        fail_if_modified: Fail item if local changes detected
+        allow_merge: Hint to allow merge workflows
+        continue_on_error: Continue syncing remaining files on per-file failure
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Bulk sync operation summary and per-file results
+    """
+    if not paths or not isinstance(paths, list):
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "paths list parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+    data = {
+        "paths": ",".join([str(p) for p in paths]),
+        "comment": comment,
+        "auto_add": str(auto_add).lower(),
+        "keep_checked_out": str(keep_checked_out).lower(),
+        "exclusive_checkout": str(exclusive_checkout).lower(),
+        "force": str(force).lower(),
+        "fail_if_modified": str(fail_if_modified).lower(),
+        "allow_merge": str(allow_merge).lower(),
+        "continue_on_error": str(continue_on_error).lower()
+    }
+    response = safe_post(port, "server/version_control/sync-bulk", data)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_checkout_file(path: str = None,
+                         current: bool = False,
+                         exclusive: bool = False,
+                         port: int = None) -> dict:
+    """Check out a file from Ghidra Server version control."""
+    port = _get_instance_port(port)
+    data = {
+        "current": str(current).lower(),
+        "exclusive": str(exclusive).lower()
+    }
+    if path:
+        data["path"] = path
+    response = safe_post(port, "server/version_control/checkout", data)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_checkin_file(path: str = None,
+                        current: bool = False,
+                        comment: str = "Checked in via GhydraMCP",
+                        keep_checked_out: bool = False,
+                        port: int = None) -> dict:
+    """Check in a file to Ghidra Server version control."""
+    port = _get_instance_port(port)
+    data = {
+        "current": str(current).lower(),
+        "comment": comment,
+        "keep_checked_out": str(keep_checked_out).lower()
+    }
+    if path:
+        data["path"] = path
+    response = safe_post(port, "server/version_control/checkin", data)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_undo_checkout_file(path: str = None,
+                              current: bool = False,
+                              keep: bool = False,
+                              port: int = None) -> dict:
+    """Undo checkout for a version-controlled file."""
+    port = _get_instance_port(port)
+    data = {
+        "current": str(current).lower(),
+        "keep": str(keep).lower()
+    }
+    if path:
+        data["path"] = path
+    response = safe_post(port, "server/version_control/undo_checkout", data)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_file_status(path: str = None,
+                       current: bool = False,
+                       port: int = None) -> dict:
+    """Get version-control status for a file."""
+    port = _get_instance_port(port)
+    params = {"current": str(current).lower()}
+    if path:
+        params["path"] = path
+    response = safe_get(port, "server/version_control/file-status", params)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_list_repository_files(folder: str = "/",
+                                 recursive: bool = True,
+                                 offset: int = 0,
+                                 limit: int = 100,
+                                 port: int = None) -> dict:
+    """List files from repository/project tree for server workflows."""
+    port = _get_instance_port(port)
+    params = {
+        "folder": folder,
+        "recursive": str(recursive).lower(),
+        "offset": str(offset),
+        "limit": str(limit)
+    }
+    response = safe_get(port, "server/repository/files", params)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_get_version_history(path: str = None,
+                               current: bool = False,
+                               port: int = None) -> dict:
+    """Get version history for a file from Ghidra Server-backed project."""
+    port = _get_instance_port(port)
+    params = {"current": str(current).lower()}
+    if path:
+        params["path"] = path
+    response = safe_get(port, "server/version_history", params)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def server_checkout_current(exclusive: bool = False, port: int = None) -> dict:
+    """Convenience wrapper: checkout current program file."""
+    return server_checkout_file(current=True, exclusive=exclusive, port=port)
+
+
+@mcp.tool()
+@text_output
+def server_checkin_current(comment: str = "Checked in via GhydraMCP",
+                           keep_checked_out: bool = False,
+                           port: int = None) -> dict:
+    """Convenience wrapper: checkin current program file."""
+    return server_checkin_file(current=True, comment=comment, keep_checked_out=keep_checked_out, port=port)
+
+
+@mcp.tool()
+@text_output
+def server_undo_checkout_current(keep: bool = False, port: int = None) -> dict:
+    """Convenience wrapper: undo checkout for current program file."""
+    return server_undo_checkout_file(current=True, keep=keep, port=port)
+
+
 # ================= Analysis =================
 
 @mcp.tool()
@@ -3570,6 +4168,120 @@ def segments_list(offset: int = 0, limit: int = 100, name: str = None, port: int
 
 @mcp.tool()
 @text_output
+def segments_map(address: str = None, port: int = None) -> dict:
+    """Build a memory segment map and optionally resolve one address to its segment.
+
+    Args:
+        address: Optional address in hex format to resolve within mapped segments
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Ordered segment map and optional address-to-segment resolution
+    """
+    port = _get_instance_port(port)
+    response = safe_get(port, "segments", {"offset": 0, "limit": 10000})
+    simplified = simplify_response(response)
+
+    if not isinstance(simplified, dict):
+        return {
+            "success": False,
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "Unexpected segments response type"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    if not simplified.get("success", False):
+        return simplified
+
+    items = simplified.get("result", [])
+    if not isinstance(items, list):
+        return {
+            "success": False,
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "Unexpected segments result format"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    mapped = []
+    for seg in items:
+        if not isinstance(seg, dict):
+            continue
+
+        start = seg.get("start")
+        end = seg.get("end")
+        start_int = _parse_hex_address(start)
+        end_int = _parse_hex_address(end)
+        if start_int is None or end_int is None:
+            continue
+
+        perms = ""
+        perms += "R" if seg.get("readable") else "-"
+        perms += "W" if seg.get("writable") else "-"
+        perms += "X" if seg.get("executable") else "-"
+
+        mapped.append({
+            "name": seg.get("name", ""),
+            "start": start,
+            "end": end,
+            "start_offset": start_int,
+            "end_offset": end_int,
+            "size": seg.get("size", 0),
+            "permissions": perms,
+            "readable": bool(seg.get("readable")),
+            "writable": bool(seg.get("writable")),
+            "executable": bool(seg.get("executable")),
+            "initialized": bool(seg.get("initialized")),
+        })
+
+    mapped.sort(key=lambda s: s.get("start_offset", 0))
+
+    result = {
+        "count": len(mapped),
+        "segments": mapped,
+    }
+
+    if address is not None:
+        target = _parse_hex_address(address)
+        if target is None:
+            return {
+                "success": False,
+                "error": {
+                    "code": "INVALID_PARAMETER",
+                    "message": f"Invalid address format: {address}"
+                },
+                "timestamp": int(time.time() * 1000)
+            }
+
+        matched_segment = None
+        for seg in mapped:
+            if seg["start_offset"] <= target <= seg["end_offset"]:
+                matched_segment = seg
+                break
+
+        result["address"] = address
+        result["address_offset"] = target
+        result["segment"] = matched_segment
+
+    output = {
+        "success": True,
+        "result": result,
+        "size": len(mapped),
+        "timestamp": int(time.time() * 1000)
+    }
+
+    for key in ("id", "instance", "api_links"):
+        if key in simplified:
+            output[key] = simplified[key]
+
+    return output
+
+
+@mcp.tool()
+@text_output
 def namespaces_list(offset: int = 0, limit: int = 100, port: int = None) -> dict:
     """List namespaces in the program
 
@@ -3656,26 +4368,65 @@ def datatypes_list(offset: int = 0, limit: int = 100, category: str = None,
 
 @mcp.tool()
 @text_output
-def datatypes_search(name: str, offset: int = 0, limit: int = 100, port: int = None) -> dict:
-    """Search for data types by name
+def datatypes_get(name: str, category: str = None, kind: str = None, port: int = None) -> dict:
+    """Get a single data type by exact name.
 
     Args:
-        name: Data type name to search for
+        name: Exact data type name to look up
+        category: Optional category filter
+        kind: Optional kind filter: "struct", "enum", or "union"
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Exact matching data type details or a clear not-found error
+    """
+    port = _get_instance_port(port)
+    params = {"name": name}
+    if category:
+        params["category"] = category
+    if kind:
+        params["kind"] = kind
+    response = safe_get(port, "datatypes", params)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def datatypes_search(name: str, offset: int = 0, limit: int = 100,
+                     exact: bool = False, category: str = None,
+                     kind: str = None, port: int = None) -> dict:
+    """Search for data types by name.
+
+    Args:
+        name: Data type name or query string to search for
         offset: Pagination offset (default: 0)
         limit: Maximum items to return (default: 100)
+        exact: Require an exact name match and return not found clearly when absent
+        category: Optional category filter
+        kind: Optional kind filter: "struct", "enum", or "union"
         port: Specific Ghidra instance port (optional)
 
     Returns:
         dict: Matching data types
     """
     port = _get_instance_port(port)
-    params = {"offset": offset, "limit": limit, "name": name}
+    params = {"offset": offset, "limit": limit}
+    if exact:
+        params["query"] = name
+        params["exact"] = "true"
+    else:
+        params["query"] = name
+    if category:
+        params["category"] = category
+    if kind:
+        params["kind"] = kind
     response = safe_get(port, "datatypes", params)
     simplified = simplify_response(response)
     if isinstance(simplified, dict) and "error" not in simplified:
         simplified.setdefault("size", len(simplified.get("result", [])))
         simplified.setdefault("offset", offset)
         simplified.setdefault("limit", limit)
+        simplified.setdefault("exact", exact)
     return simplified
 
 

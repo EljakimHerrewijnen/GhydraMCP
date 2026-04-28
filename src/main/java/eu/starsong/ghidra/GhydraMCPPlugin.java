@@ -50,7 +50,7 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
     // Made public static to be accessible by InstanceEndpoints
     public static final Map<Integer, GhydraMCPPlugin> activeInstances = new ConcurrentHashMap<>();
     private static final Object baseInstanceLock = new Object();
-    
+
     private HttpServer server;
     private int port;
     private boolean isBaseInstance = false;
@@ -62,10 +62,10 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
      */
     public GhydraMCPPlugin(PluginTool tool) {
         super(tool);
-        
+
         this.port = findAvailablePort();
         activeInstances.put(port, this);
-        
+
         synchronized (baseInstanceLock) {
             if (port == ApiConstants.DEFAULT_PORT || activeInstances.get(ApiConstants.DEFAULT_PORT) == null) {
                 this.isBaseInstance = true;
@@ -83,7 +83,7 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
         } catch (IOException e) {
             Msg.error(this, "Failed to start HTTP server on port " + port, e);
             if (e.getMessage().contains("Address already in use")) {
-                Msg.showError(this, null, "Port Conflict", 
+                Msg.showError(this, null, "Port Conflict",
                     "Port " + port + " is already in use. Please specify a different port with -Dghidra.mcp.port=NEW_PORT");
             }
         }
@@ -94,7 +94,7 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
      */
     private void startServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
-        
+
         // Use a cached thread pool with larger stack size to handle deep B-tree
         // traversals in Ghidra's database (large binaries have deep index trees)
         final long STACK_SIZE = 4 * 1024 * 1024; // 4 MB
@@ -103,17 +103,17 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
 
         // --- Register Endpoints ---
         Program currentProgram = getCurrentProgram(); // Get program once
-        
+
         // Register Meta Endpoints (these don't require a program)
-        registerMetaEndpoints(server); 
-        
+        registerMetaEndpoints(server);
+
         // Register endpoints that don't require a program
         registerProjectEndpoints(server);
         new InstanceEndpoints(currentProgram, port, activeInstances).registerEndpoints(server);
-        
+
         // Register Resource Endpoints that require a program
         registerProgramDependentEndpoints(server);
-        
+
         // Register Root Endpoint (should be last to include links to all other endpoints)
         registerRootEndpoint(server);
 
@@ -123,12 +123,12 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
             System.out.println("[GhydraMCP] HTTP server started on port " + port);
         }, "GhydraMCP-HTTP-Server").start();
     }
-    
+
     /**
      * Register all endpoints that require a program to function.
      * This method always registers all endpoints, even when no program is loaded.
      * The endpoints will check for program availability at runtime when they're called.
-     * 
+     *
      * IMPORTANT: Endpoints are registered in order from most specific to least specific
      * to ensure proper URL path matching.
      */
@@ -136,16 +136,17 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
         // Register all endpoints without checking for a current program
         // The endpoints will check for the current program at runtime when they're called
         Msg.info(this, "Registering program-dependent endpoints. Programs will be checked at runtime.");
-        
+
         Program currentProgram = getCurrentProgram();
         Msg.info(this, "Current program at registration time: " + (currentProgram != null ? currentProgram.getName() : "none"));
-        
+
         new FunctionEndpoints(currentProgram, port, tool, decompilerCache).registerEndpoints(server);
         new VariableEndpoints(currentProgram, port, tool, decompilerCache).registerEndpoints(server);
         new ClassEndpoints(currentProgram, port, tool).registerEndpoints(server);
         new SegmentEndpoints(currentProgram, port, tool).registerEndpoints(server);
         new SymbolEndpoints(currentProgram, port, tool).registerEndpoints(server);
         new NamespaceEndpoints(currentProgram, port, tool).registerEndpoints(server);
+        new DataTypeEndpoints(currentProgram, port, tool).registerEndpoints(server);
         new DataEndpoints(currentProgram, port, tool).registerEndpoints(server);
         new StructEndpoints(currentProgram, port, tool).registerEndpoints(server);
         new MemoryEndpoints(currentProgram, port, tool).registerEndpoints(server);
@@ -156,7 +157,7 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
 
         Msg.info(this, "Registered program-dependent endpoints. Programs will be checked at runtime.");
     }
-    
+
     /**
      * Register additional endpoints for current program state
      */
@@ -164,9 +165,9 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
         // Any additional endpoints can be added here if needed
         // But prefer to use the HATEOAS endpoints in ProgramEndpoints, FunctionEndpoints, etc.
     }
-    
+
     // --- Endpoint Registration Methods ---
-    
+
     /**
      * Register meta endpoints that provide plugin information
      */
@@ -183,7 +184,7 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
                         ))
                         .addLink("self", "/plugin-version")
                         .addLink("root", "/");
-                        
+
                     HttpUtil.sendJsonResponse(exchange, builder.build(), 200, port);
                 } else {
                     HttpUtil.sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED", port);
@@ -192,13 +193,13 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
                 Msg.error(this, "Error handling /plugin-version", e);
             }
         });
-        
+
         // Info endpoint
         server.createContext("/info", exchange -> {
             try {
                 Map<String, Object> infoData = new HashMap<>();
                 infoData.put("isBaseInstance", isBaseInstance);
-                
+
                 Program program = getCurrentProgram();
                 if (program != null) {
                     infoData.put("file", program.getName());
@@ -208,42 +209,42 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
                     infoData.put("creationDate", program.getCreationDate());
                     infoData.put("executable", program.getExecutablePath());
                 }
-                
+
                 Project project = tool.getProject();
                 if (project != null) {
                     infoData.put("project", project.getName());
                     infoData.put("projectLocation", project.getProjectLocator().toString());
                 }
-                
+
                 // Add server details
                 infoData.put("serverPort", port);
                 infoData.put("serverStartTime", System.currentTimeMillis());
                 infoData.put("instanceCount", activeInstances.size());
-                
+
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                    .success(true)
                    .result(infoData)
                    .addLink("self", "/info")
                    .addLink("root", "/")
                    .addLink("instances", "/instances");
-                
+
                 // Add program link if available
                 if (program != null) {
                     builder.addLink("program", "/program");
                 }
-                
+
                 HttpUtil.sendJsonResponse(exchange, builder.build(), 200, port);
             } catch (Exception e) {
                 Msg.error(this, "Error serving /info endpoint", e);
-                try { 
-                    HttpUtil.sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR", port); 
-                } catch (IOException ioEx) { 
-                    Msg.error(this, "Failed to send error for /info", ioEx); 
+                try {
+                    HttpUtil.sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR", port);
+                } catch (IOException ioEx) {
+                    Msg.error(this, "Failed to send error for /info", ioEx);
                 }
             }
         });
     }
-    
+
     /**
      * Register project-related endpoints
      */
@@ -259,18 +260,18 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
                         projInfo.put("location", project.getProjectLocator().toString());
                         projects.add(projInfo);
                     }
-                    
+
                     ResponseBuilder builder = new ResponseBuilder(exchange, port)
                         .success(true)
                         .result(projects)
                         .addLink("self", "/projects")
                         .addLink("create", "/projects", "POST");
-                        
+
                     // Add link to current project if available
                     if (project != null) {
                         builder.addLink("current", "/projects/" + project.getName());
                     }
-                    
+
                     HttpUtil.sendJsonResponse(exchange, builder.build(), 200, port);
                 } else if ("POST".equals(exchange.getRequestMethod())) {
                     // Creating projects is not yet implemented
@@ -280,14 +281,14 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
                 }
             } catch (Exception e) {
                 Msg.error(this, "Error serving /projects endpoint", e);
-                try { 
-                    HttpUtil.sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR", port); 
-                } catch (IOException ioEx) { 
-                    Msg.error(this, "Failed to send error for /projects", ioEx); 
+                try {
+                    HttpUtil.sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR", port);
+                } catch (IOException ioEx) {
+                    Msg.error(this, "Failed to send error for /projects", ioEx);
                 }
             }
         });
-        
+
         // Specific project endpoint
         server.createContext("/projects/", exchange -> {
             try {
@@ -298,48 +299,48 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
                     exchange.sendResponseHeaders(302, -1);
                     return;
                 }
-                
+
                 // Extract project name from path
                 String projectName = path.substring("/projects/".length());
-                
+
                 if ("GET".equals(exchange.getRequestMethod())) {
                     Project currentProject = tool.getProject();
                     if (currentProject == null) {
                         HttpUtil.sendErrorResponse(exchange, 404, "No project is currently open", "NO_PROJECT_OPEN", port);
                         return;
                     }
-                    
+
                     if (!currentProject.getName().equals(projectName)) {
                         HttpUtil.sendErrorResponse(exchange, 404, "Project not found: " + projectName, "PROJECT_NOT_FOUND", port);
                         return;
                     }
-                    
+
                     // Build project details
                     Map<String, Object> projectDetails = new HashMap<>();
                     projectDetails.put("name", currentProject.getName());
                     projectDetails.put("location", currentProject.getProjectLocator().toString());
-                    
+
                     ResponseBuilder builder = new ResponseBuilder(exchange, port)
                         .success(true)
                         .result(projectDetails)
                         .addLink("self", "/projects/" + projectName)
                         .addLink("programs", "/programs?project=" + projectName);
-                    
+
                     HttpUtil.sendJsonResponse(exchange, builder.build(), 200, port);
                 } else {
                     HttpUtil.sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED", port);
                 }
             } catch (Exception e) {
                 Msg.error(this, "Error serving /projects/{name} endpoint", e);
-                try { 
-                    HttpUtil.sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR", port); 
-                } catch (IOException ioEx) { 
-                    Msg.error(this, "Failed to send error for /projects/{name}", ioEx); 
+                try {
+                    HttpUtil.sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR", port);
+                } catch (IOException ioEx) {
+                    Msg.error(this, "Failed to send error for /projects/{name}", ioEx);
                 }
             }
         });
     }
-    
+
     /**
      * Register the root endpoint which provides links to all other API endpoints
      */
@@ -351,18 +352,18 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
                     // CORS was already handled
                     return;
                 }
-                
+
                 // Check if this is a request for the root endpoint specifically
                 if (!exchange.getRequestURI().getPath().equals("/")) {
                     HttpUtil.sendErrorResponse(exchange, 404, "Endpoint not found", "ENDPOINT_NOT_FOUND", port);
                     return;
                 }
-            
+
                 Map<String, Object> rootData = new HashMap<>();
                 rootData.put("message", "GhydraMCP API " + ApiConstants.API_VERSION);
                 rootData.put("documentation", "See GHIDRA_HTTP_API.md for full API documentation");
                 rootData.put("isBaseInstance", isBaseInstance);
-                
+
                 // Build the HATEOAS response
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
@@ -373,12 +374,12 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
                     .addLink("projects", "/projects")
                     .addLink("instances", "/instances")
                     .addLink("programs", "/programs");
-                
+
                 // Add links to program-dependent endpoints if a program is loaded
                 if (getCurrentProgram() != null) {
                     Project project = tool.getProject();
                     String projectName = (project != null) ? project.getName() : "unknown";
-                    
+
                     builder.addLink("program", "/program")
                            .addLink("project", "/projects/" + projectName)
                            .addLink("functions", "/functions")
@@ -393,14 +394,14 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
                            .addLink("address", "/address")
                            .addLink("function", "/function");
                 }
-                
+
                 HttpUtil.sendJsonResponse(exchange, builder.build(), 200, port);
             } catch (Exception e) {
                 Msg.error(this, "Error serving / endpoint", e);
-                try { 
-                    HttpUtil.sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR", port); 
-                } catch (IOException ioEx) { 
-                    Msg.error(this, "Failed to send error for /", ioEx); 
+                try {
+                    HttpUtil.sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR", port);
+                } catch (IOException ioEx) {
+                    Msg.error(this, "Failed to send error for /", ioEx);
                 }
             }
         });
@@ -434,7 +435,7 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
     private int findAvailablePort() {
         int basePort = ApiConstants.DEFAULT_PORT;
         int maxAttempts = ApiConstants.MAX_PORT_ATTEMPTS;
-        
+
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             int candidate = basePort + attempt;
             if (!activeInstances.containsKey(candidate)) {
@@ -475,7 +476,7 @@ public class GhydraMCPPlugin extends Plugin implements ApplicationLevelPlugin {
     public int getPort() {
         return port;
     }
-    
+
     /**
      * Check if this is the base instance
      * @return true if this is the base instance

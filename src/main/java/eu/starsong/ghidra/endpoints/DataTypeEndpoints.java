@@ -67,13 +67,16 @@ public class DataTypeEndpoints extends AbstractEndpoint {
             String category = firstNonBlank(params.get("category"), robustParams.get("category"));
             String kind = firstNonBlank(params.get("kind"), robustParams.get("kind")); // struct, enum, union
             String name = firstNonBlank(params.get("name"), robustParams.get("name"));
+            String query = firstNonBlank(params.get("query"), robustParams.get("query"));
+            String exactParam = firstNonBlank(params.get("exact"), robustParams.get("exact"));
+            boolean exact = Boolean.parseBoolean(exactParam != null ? exactParam : "false");
 
             DataTypeManager dtm = program.getDataTypeManager();
 
             if (name != null && !name.isEmpty()) {
                 DataType found = findDataTypeByName(dtm, name, category, kind);
                 if (found == null) {
-                    sendErrorResponse(exchange, 404, "Data type not found: " + name, "RESOURCE_NOT_FOUND");
+                    sendErrorResponse(exchange, 404, "Exact data type not found: " + name, "RESOURCE_NOT_FOUND");
                     return;
                 }
 
@@ -93,17 +96,28 @@ public class DataTypeEndpoints extends AbstractEndpoint {
 
             List<Map<String, Object>> dataTypes = new ArrayList<>();
 
-            // Iterate through all data types
             Iterator<DataType> iterator = dtm.getAllDataTypes();
             while (iterator.hasNext()) {
                 DataType dt = iterator.next();
 
-                // Apply filters
                 if (!matchesFilters(dt, category, kind)) {
                     continue;
                 }
 
+                if (query != null && !query.isEmpty()) {
+                    String dtName = dt.getName();
+                    boolean matches = exact ? query.equals(dtName) : dtName.toLowerCase().contains(query.toLowerCase());
+                    if (!matches) {
+                        continue;
+                    }
+                }
+
                 dataTypes.add(toDataTypeInfo(dt));
+            }
+
+            if (query != null && !query.isEmpty() && exact && dataTypes.isEmpty()) {
+                sendErrorResponse(exchange, 404, "Exact data type not found: " + query, "RESOURCE_NOT_FOUND");
+                return;
             }
 
             // Build response
@@ -120,6 +134,15 @@ public class DataTypeEndpoints extends AbstractEndpoint {
             builder.addLink("create_struct", "/datatypes/struct", "POST");
             builder.addLink("create_enum", "/datatypes/enum", "POST");
             builder.addLink("create_union", "/datatypes/union", "POST");
+
+            Map<String, Object> metadata = new HashMap<>();
+            metadata.put("offset", offset);
+            metadata.put("limit", limit);
+            metadata.put("exact", exact);
+            if (query != null && !query.isEmpty()) {
+                metadata.put("query", query);
+            }
+            builder.metadata(metadata);
 
             sendJsonResponse(exchange, builder.build(), 200);
 

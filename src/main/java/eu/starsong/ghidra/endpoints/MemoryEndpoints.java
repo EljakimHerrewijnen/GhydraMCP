@@ -14,10 +14,12 @@ import ghidra.program.model.address.AddressFactory;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.address.AddressOverflowException;
 import ghidra.program.model.listing.CommentType;
 import ghidra.program.model.listing.Program;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.util.Msg;
+import ghidra.util.task.TaskMonitor;
 
 import java.io.IOException;
 import java.awt.Color;
@@ -31,16 +33,16 @@ public class MemoryEndpoints extends AbstractEndpoint {
     private static final int DEFAULT_MEMORY_LENGTH = 16;
     private static final int MAX_MEMORY_LENGTH = 1048576;
     private PluginTool tool;
-    
+
     public MemoryEndpoints(Program program, int port) {
         super(program, port);
     }
-    
+
     public MemoryEndpoints(Program program, int port, PluginTool tool) {
         super(program, port);
         this.tool = tool;
     }
-    
+
     @Override
     protected PluginTool getTool() {
         return tool;
@@ -50,7 +52,7 @@ public class MemoryEndpoints extends AbstractEndpoint {
     public void registerEndpoints(HttpServer server) {
         // Per HttpServer docs: paths are matched by longest matching prefix
         // So register specific endpoints first, then more general ones
-        
+
         // Comments endpoint path needs to be registered with a specific context path
         // Example: /memory/0x1000/comments/plate needs a specific handler
         server.createContext("/memory/", exchange -> {
@@ -66,11 +68,11 @@ public class MemoryEndpoints extends AbstractEndpoint {
                 handleMemoryAddressRequest(exchange);
             }
         });
-        
+
         // Register the most general endpoint last
         server.createContext("/memory", this::handleMemoryRequest);
     }
-    
+
     private void handleMemoryRequest(HttpExchange exchange) throws IOException {
         try {
             String method = exchange.getRequestMethod();
@@ -78,28 +80,28 @@ public class MemoryEndpoints extends AbstractEndpoint {
                 Map<String, String> qparams = parseQueryParams(exchange);
                 String addressStr = qparams.get("address");
                 String lengthStr = qparams.get("length");
-                
+
                 // Create ResponseBuilder for HATEOAS-compliant response
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
-                    .addLink("self", "/memory" + (exchange.getRequestURI().getRawQuery() != null ? 
+                    .addLink("self", "/memory" + (exchange.getRequestURI().getRawQuery() != null ?
                         "?" + exchange.getRequestURI().getRawQuery() : ""));
-                
+
                 // Add common links
                 builder.addLink("program", "/program");
                 builder.addLink("blocks", "/memory/blocks");
-                
+
                 Program program = getCurrentProgram();
                 if (program == null) {
                     sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                     return;
                 }
-                
+
                 if (addressStr == null || addressStr.isEmpty()) {
                     sendErrorResponse(exchange, 400, "Address parameter is required", "MISSING_PARAMETER");
                     return;
                 }
-                
+
                 // Parse length parameter
                 int length = DEFAULT_MEMORY_LENGTH;
                 int requestedLength = length;
@@ -123,7 +125,7 @@ public class MemoryEndpoints extends AbstractEndpoint {
                         return;
                     }
                 }
-                
+
                 // Parse address with safety fallbacks
                 AddressFactory addressFactory = program.getAddressFactory();
                 Address address;
@@ -141,7 +143,7 @@ public class MemoryEndpoints extends AbstractEndpoint {
                         Msg.warn(this, "Could not get image base. Using default address: " + address);
                     }
                 }
-                
+
                 // Read memory
                 Memory memory = program.getMemory();
                 if (!memory.contains(address)) {
@@ -156,12 +158,12 @@ public class MemoryEndpoints extends AbstractEndpoint {
                         return;
                     }
                 }
-                
+
                 try {
                     // Read bytes
                     byte[] bytes = new byte[length];
                     int bytesRead = memory.getBytes(address, bytes, 0, length);
-                    
+
                     // Format as hex string (continuous, no spaces - Python bridge parses by pairs)
                     StringBuilder hexString = new StringBuilder();
                     for (int i = 0; i < bytesRead; i++) {
@@ -171,7 +173,7 @@ public class MemoryEndpoints extends AbstractEndpoint {
                         }
                         hexString.append(hex);
                     }
-                    
+
                     // Build result object
                     Map<String, Object> result = new HashMap<>();
                     result.put("address", address.toString());
@@ -182,21 +184,21 @@ public class MemoryEndpoints extends AbstractEndpoint {
                         result.put("warning", "Requested length " + requestedLength +
                                    " exceeds maximum " + MAX_MEMORY_LENGTH + "; result was capped");
                     }
-                    
+
                     // Add next/prev links
                     builder.addLink("next", "/memory?address=" + address.add(length) + "&length=" + length);
                     if (address.getOffset() >= length) {
                         builder.addLink("prev", "/memory?address=" + address.subtract(length) + "&length=" + length);
                     }
-                    
+
                     // Add result and send response
                     builder.result(result);
                     sendJsonResponse(exchange, builder.build(), 200);
-                    
+
                 } catch (MemoryAccessException e) {
                     sendErrorResponse(exchange, 404, "Cannot read memory at address: " + e.getMessage(), "MEMORY_ACCESS_ERROR");
                 }
-                
+
             } else if ("PATCH".equals(method)) {
                 // Memory write operation
                 Map<String, String> qparams = parseQueryParams(exchange);
@@ -387,7 +389,7 @@ public class MemoryEndpoints extends AbstractEndpoint {
         }
         return out;
     }
-    
+
     /**
  * Handle requests to /memory/{address} including child resources like comments
  */
@@ -399,10 +401,10 @@ private void handleMemoryAddressRequest(HttpExchange exchange) throws IOExceptio
             handleMemoryRequest(exchange);
             return;
         }
-        
+
         // Parse address from path
         String remainingPath = path.substring("/memory/".length());
-        
+
         // Check if this is a request for a specific address's comments
         if (remainingPath.contains("/comments/")) {
             // Format: /memory/{address}/comments/{comment_type}
@@ -427,15 +429,15 @@ private void handleMemoryAddressRequest(HttpExchange exchange) throws IOExceptio
             handleDisassemblyAtAddress(exchange, addressStr);
             return;
         }
-        
+
         // Otherwise, treat as a direct memory request with address in the path
         String addressStr = remainingPath;
         Map<String, String> params = parseQueryParams(exchange);
-        
+
         // Handle same as the query parameter version
         params.put("address", addressStr);
         exchange.setAttribute("address", addressStr);
-        
+
         // Delegate to the main memory handler
         handleMemoryRequest(exchange);
     } catch (Exception e) {
@@ -887,12 +889,12 @@ private void handleMemoryComments(HttpExchange exchange, String addressStr, Stri
     try {
         String method = exchange.getRequestMethod();
         Program program = getCurrentProgram();
-        
+
         if (program == null) {
             sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
             return;
         }
-        
+
         // Parse address
         AddressFactory addressFactory = program.getAddressFactory();
         Address address;
@@ -902,52 +904,52 @@ private void handleMemoryComments(HttpExchange exchange, String addressStr, Stri
             sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_ADDRESS");
             return;
         }
-        
+
         // Validate comment type
         if (!isValidCommentType(commentType)) {
             sendErrorResponse(exchange, 400, "Invalid comment type: " + commentType, "INVALID_COMMENT_TYPE");
             return;
         }
-                
+
         if ("GET".equals(method)) {
             // Get existing comment
             String comment = getCommentByType(program, address, commentType);
-            
+
             Map<String, Object> result = new HashMap<>();
             result.put("address", addressStr);
             result.put("comment_type", commentType);
             result.put("comment", comment != null ? comment : "");
-            
+
             ResponseBuilder builder = new ResponseBuilder(exchange, port)
                 .success(true)
                 .result(result)
                 .addLink("self", "/memory/" + addressStr + "/comments/" + commentType);
-                
+
             sendJsonResponse(exchange, builder.build(), 200);
-            
+
         } else if ("POST".equals(method)) {
             // Set comment
             Map<String, String> params = parseJsonPostParams(exchange);
             String comment = params.get("comment");
-            
+
             if (comment == null) {
                 sendErrorResponse(exchange, 400, "Comment parameter is required", "MISSING_PARAMETER");
                 return;
             }
-            
+
             boolean success = setCommentByType(program, address, commentType, comment);
-            
+
             if (success) {
                 Map<String, Object> result = new HashMap<>();
                 result.put("address", addressStr);
                 result.put("comment_type", commentType);
                 result.put("comment", comment);
-                
+
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
                     .result(result)
                     .addLink("self", "/memory/" + addressStr + "/comments/" + commentType);
-                    
+
                 sendJsonResponse(exchange, builder.build(), 200);
             } else {
                 sendErrorResponse(exchange, 500, "Failed to set comment", "COMMENT_SET_FAILED");
@@ -965,9 +967,9 @@ private void handleMemoryComments(HttpExchange exchange, String addressStr, Stri
  * Check if the comment type is valid
  */
 private boolean isValidCommentType(String commentType) {
-    return commentType.equals("plate") || 
-           commentType.equals("pre") || 
-           commentType.equals("post") || 
+    return commentType.equals("plate") ||
+           commentType.equals("pre") ||
+           commentType.equals("post") ||
            commentType.equals("eol") ||
            commentType.equals("repeatable");
 }
@@ -1118,27 +1120,27 @@ private void handleDisassemblyAtAddress(HttpExchange exchange, String addressStr
                 Map<String, String> qparams = parseQueryParams(exchange);
                 int offset = parseIntOrDefault(qparams.get("offset"), 0);
                 int limit = parseIntOrDefault(qparams.get("limit"), 100);
-                
+
                 Program program = getCurrentProgram();
                 if (program == null) {
                     sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                     return;
                 }
-                
+
                 // Create ResponseBuilder for HATEOAS-compliant response
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
-                    .addLink("self", "/memory/blocks" + (exchange.getRequestURI().getRawQuery() != null ? 
+                    .addLink("self", "/memory/blocks" + (exchange.getRequestURI().getRawQuery() != null ?
                         "?" + exchange.getRequestURI().getRawQuery() : ""));
-                
+
                 // Add common links
                 builder.addLink("program", "/program");
                 builder.addLink("memory", "/memory");
-                
+
                 // Get memory blocks
                 Memory memory = program.getMemory();
                 List<Map<String, Object>> blocks = new ArrayList<>();
-                
+
                 for (MemoryBlock block : memory.getBlocks()) {
                     Map<String, Object> blockInfo = new HashMap<>();
                     blockInfo.put("name", block.getName());
@@ -1151,17 +1153,145 @@ private void handleDisassemblyAtAddress(HttpExchange exchange, String addressStr
                     blockInfo.put("isMapped", block.isMapped());
                     blocks.add(blockInfo);
                 }
-                
+
                 // Apply pagination and add it to result
-                List<Map<String, Object>> paginatedBlocks = 
+                List<Map<String, Object>> paginatedBlocks =
                     applyPagination(blocks, offset, limit, builder, "/memory/blocks");
-                
+
                 // Add the result to the builder
                 builder.result(paginatedBlocks);
-                
+
                 // Send the HATEOAS-compliant response
                 sendJsonResponse(exchange, builder.build(), 200);
-                
+
+            } else if ("POST".equals(exchange.getRequestMethod())) {
+                Program program = getCurrentProgram();
+                if (program == null) {
+                    sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+                    return;
+                }
+
+                Map<String, String> payload = parseJsonPostParams(exchange);
+                String name = payload.get("name");
+                String addressStr = payload.get("address");
+                String sizeStr = payload.get("size");
+
+                if (name == null || name.isBlank()) {
+                    sendErrorResponse(exchange, 400, "'name' field required", "MISSING_PARAMETER");
+                    return;
+                }
+                if (addressStr == null || addressStr.isBlank()) {
+                    sendErrorResponse(exchange, 400, "'address' field required", "MISSING_PARAMETER");
+                    return;
+                }
+                if (sizeStr == null || sizeStr.isBlank()) {
+                    sendErrorResponse(exchange, 400, "'size' field required", "MISSING_PARAMETER");
+                    return;
+                }
+
+                long size;
+                try {
+                    size = Long.parseLong(sizeStr);
+                } catch (NumberFormatException nfe) {
+                    sendErrorResponse(exchange, 400, "'size' must be a positive integer", "INVALID_PARAMETER");
+                    return;
+                }
+                if (size <= 0) {
+                    sendErrorResponse(exchange, 400, "'size' must be greater than 0", "INVALID_PARAMETER");
+                    return;
+                }
+
+                boolean readable = Boolean.parseBoolean(Optional.ofNullable(payload.get("readable")).orElse("true"));
+                boolean writable = Boolean.parseBoolean(Optional.ofNullable(payload.get("writable")).orElse("false"));
+                boolean executable = Boolean.parseBoolean(Optional.ofNullable(payload.get("executable")).orElse("false"));
+                boolean initialized = Boolean.parseBoolean(Optional.ofNullable(payload.get("initialized")).orElse("false"));
+
+                AddressFactory addressFactory = program.getAddressFactory();
+                Address start;
+                try {
+                    start = addressFactory.getAddress(addressStr);
+                } catch (Exception e) {
+                    sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_PARAMETER");
+                    return;
+                }
+                if (start == null) {
+                    sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_PARAMETER");
+                    return;
+                }
+
+                Address end;
+                try {
+                    end = start.addNoWrap(size - 1);
+                } catch (AddressOverflowException aoe) {
+                    sendErrorResponse(exchange, 400, "Address range overflows address space", "INVALID_PARAMETER");
+                    return;
+                }
+
+                Memory memory = program.getMemory();
+                if (memory.getBlock(name) != null) {
+                    sendErrorResponse(exchange, 409, "Memory block already exists: " + name, "ALREADY_EXISTS");
+                    return;
+                }
+
+                if (memory.intersects(start, end)) {
+                    sendErrorResponse(exchange, 409, "Requested range overlaps existing memory block", "OVERLAPPING_BLOCK");
+                    return;
+                }
+
+                final AtomicReference<MemoryBlock> createdRef = new AtomicReference<>();
+                try {
+                    TransactionHelper.executeInTransaction(program, "Create Memory Block", () -> {
+                        MemoryBlock block;
+                        if (initialized) {
+                            // Use reflection for broad Ghidra-version compatibility around checked exceptions.
+                            block = (MemoryBlock) memory.getClass()
+                                .getMethod("createInitializedBlock", String.class, Address.class, long.class, byte.class, TaskMonitor.class, boolean.class)
+                                .invoke(memory, name, start, size, (byte) 0x00, TaskMonitor.DUMMY, false);
+                        } else {
+                            // Use reflection for broad Ghidra-version compatibility around checked exceptions.
+                            block = (MemoryBlock) memory.getClass()
+                                .getMethod("createUninitializedBlock", String.class, Address.class, long.class, boolean.class)
+                                .invoke(memory, name, start, size, false);
+                        }
+                        block.setRead(readable);
+                        block.setWrite(writable);
+                        block.setExecute(executable);
+                        createdRef.set(block);
+                        return true;
+                    });
+                } catch (TransactionHelper.TransactionException tex) {
+                    sendErrorResponse(exchange, 500, "Failed to create memory block: " + tex.getMessage(), "MEMORY_BLOCK_CREATE_FAILED");
+                    return;
+                } catch (Exception e) {
+                    sendErrorResponse(exchange, 500, "Unexpected error creating memory block: " + e.getMessage(), "MEMORY_BLOCK_CREATE_FAILED");
+                    return;
+                }
+
+                MemoryBlock created = createdRef.get();
+                if (created == null) {
+                    sendErrorResponse(exchange, 500, "Memory block creation returned no block", "MEMORY_BLOCK_CREATE_FAILED");
+                    return;
+                }
+
+                Map<String, Object> result = new HashMap<>();
+                result.put("name", created.getName());
+                result.put("start", created.getStart().toString());
+                result.put("end", created.getEnd().toString());
+                result.put("size", created.getSize());
+                result.put("permissions", getPermissionString(created));
+                result.put("isInitialized", created.isInitialized());
+                result.put("isLoaded", created.isLoaded());
+                result.put("isMapped", created.isMapped());
+
+                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                    .success(true)
+                    .result(result)
+                    .addLink("self", "/memory/blocks")
+                    .addLink("memory", "/memory")
+                    .addLink("segments", "/segments");
+
+                sendJsonResponse(exchange, builder.build(), 201);
+
             } else {
                 sendErrorResponse(exchange, 405, "Method Not Allowed");
             }
@@ -1170,7 +1300,7 @@ private void handleDisassemblyAtAddress(HttpExchange exchange, String addressStr
             sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage());
         }
     }
-    
+
     private String getPermissionString(MemoryBlock block) {
         StringBuilder perms = new StringBuilder();
         perms.append(block.isRead() ? "r" : "-");

@@ -207,6 +207,8 @@ GhydraMCP v2.2.0 organizes tools into logical namespaces for better discoverabil
 - `functions_rename`: Rename a function (params: old_name or address, new_name, port [optional])
 - `functions_set_signature`: Update function prototype (params: name or address, signature, port [optional])
 - `functions_get_variables`: Get function variables (params: name or address, port [optional])
+- `functions_get_callers`: List functions that call this function (params: name or address, offset, limit, port [optional])
+- `functions_get_callees`: List functions called by this function (params: name or address, offset, limit, port [optional])
 - `functions_set_comment`: Set function comment (params: address, comment, port [optional])
 
 **Data Manipulation** (`data_*`):
@@ -228,6 +230,11 @@ GhydraMCP v2.2.0 organizes tools into logical namespaces for better discoverabil
 **Memory Operations** (`memory_*`):
 - `memory_read`: Read bytes from memory (params: address, length, format, port [optional])
 - `memory_write`: Write bytes to memory (params: address, bytes_data, format, port [optional])
+- `memory_map_add`: Create a named memory mapping/block (params: name, address, size, readable, writable, executable, initialized, port [optional])
+
+**Memory Segments** (`segments_*`):
+- `segments_list`: List memory segments with range and permissions (params: offset, limit, name [optional], port [optional])
+- `segments_map`: Build an ordered memory segment map and optionally resolve an address to a segment (params: address [optional], port [optional])
 
 **Cross-References** (`xrefs_*`):
 - `xrefs_list`: List cross-references (params: to_addr [optional], from_addr [optional], type [optional], offset, limit, port [optional])
@@ -292,6 +299,23 @@ client.use_tool("ghydra", "structs_list", {"category": "/network"})
 # Memory Operations
 client.use_tool("ghydra", "memory_read", {"address": "0x00401000", "length": 16, "format": "hex"})
 client.use_tool("ghydra", "memory_write", {"address": "0x00401000", "bytes_data": "90909090", "format": "hex"})
+client.use_tool("ghydra", "memory_map_add", {
+  "name": "devicename",
+  "address": "0xF0000000",
+  "size": 4096,
+  "readable": True,
+  "writable": True,
+  "executable": False
+})
+
+# Function callers and callees
+client.use_tool("ghydra", "functions_get_callers", {"name": "process_packet", "offset": 0, "limit": 25})
+client.use_tool("ghydra", "functions_get_callees", {"address": "0x00401100", "offset": 0, "limit": 25})
+
+# Memory segment mapping
+client.use_tool("ghydra", "segments_list", {"offset": 0, "limit": 100})
+client.use_tool("ghydra", "segments_map")  # Build full ordered segment map
+client.use_tool("ghydra", "segments_map", {"address": "0x00401000"})  # Resolve one address to its containing segment
 
 # Cross-References
 client.use_tool("ghydra", "xrefs_list", {"to_addr": "0x00401000"})  # Find callers

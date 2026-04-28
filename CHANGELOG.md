@@ -9,10 +9,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - Added `scripts/build_release.sh` to build versioned plugin and complete release zip archives locally.
 - Added SHA-256 checksum generation for release artifacts.
+- Added `segments_map` MCP bridge tool to produce an ordered memory segment map and optionally resolve an address to its containing segment.
+- Added support for creating named memory block mappings via `POST /memory/blocks` and MCP tool `memory_map_add` with configurable RWX permissions.
 
 ### Changed
 - GitHub Actions can now build release-labeled zip assets on manual dispatch and publish them on tag builds.
 - Release zip filenames now use an explicit `release.label`, making GitHub release assets predictable for downloads and installation.
+
+### Fixed
+- Fixed MCP bridge function name resolution path for `functions_get_callers` and `functions_get_callees` (and shared name-resolution users), preventing runtime errors like `'str' object has no attribute 'get'` when resolving by function name.
 
 ## [2.0.0] - 2025-11-11
 
@@ -116,7 +121,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - Initial release of GhydraMCP bridge
 - Basic Ghidra instance management tools
-- Function analysis tools 
+- Function analysis tools
 - Variable manipulation tools
 
 ## [1.0] - 2025-03-24

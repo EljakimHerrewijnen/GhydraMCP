@@ -210,6 +210,162 @@ Represents the current Ghidra project, which is a container for programs.
 
 - **`GET /project`**: Get details about the current project (e.g., location, list of open programs within it via links).
 
+#### 1.1 Ghidra Server Sync
+
+These endpoints expose version-control synchronization against a shared Ghidra Server project repository.
+
+- **`GET /server/status`**: Get current server/repository connectivity status for the open project.
+  ```json
+  // Example Response
+  "result": {
+    "project": "MySharedProject",
+    "shared": true,
+    "connected": true,
+    "serverInfo": "ghidra://server:13100/MySharedProject"
+  }
+  ```
+
+- **`POST /server/version_control/sync`**: Sync a specific project file to the remote repository.
+  - Request Payload:
+    - `path` (required): Domain file path in the project, e.g. `/sample.exe`.
+    - `comment` (optional): Check-in comment. Default: `Synced via GhydraMCP`.
+    - `auto_add` (optional, default `true`): If the file is not yet versioned on the server, add it first.
+    - `keep_checked_out` (optional, default `false`): Keep checkout after check-in.
+    - `exclusive_checkout` (optional, default `false`): Request exclusive checkout before check-in.
+    - `force` (optional, default `false`): Continue if checkout cannot be immediately acquired.
+    - `fail_if_modified` (optional, default `false`): Fail if local uncommitted changes are detected.
+    - `allow_merge` (optional, default `true`): Merge-policy hint for clients/workflows.
+  - Behavior:
+    - If file is unversioned and `auto_add=true`, the plugin adds it to version control first.
+    - Then the plugin ensures checkout and performs check-in with the provided comment.
+  ```json
+  // Example Response
+  "result": {
+    "path": "/sample.exe",
+    "name": "sample.exe",
+    "auto_add": true,
+    "added_to_server": true,
+    "checked_out": true,
+    "checked_in": true,
+    "versioned": true,
+    "latest_version": 2,
+    "message": "File added to server and synced successfully"
+  }
+  ```
+
+- **`POST /server/version_control/sync-current`**: Sync the currently active program's `DomainFile` to the remote repository.
+  - Request Payload:
+    - `comment` (optional): Check-in comment.
+    - `auto_add` (optional, default `true`): Add if not yet versioned.
+    - `keep_checked_out` (optional, default `false`).
+    - `exclusive_checkout` (optional, default `false`).
+    - `force` (optional, default `false`).
+    - `fail_if_modified` (optional, default `false`).
+    - `allow_merge` (optional, default `true`).
+  - Behavior:
+    - Resolves the current program's backing `DomainFile`.
+    - If file is unversioned and `auto_add=true`, adds to version control first.
+    - Ensures checkout and then checks in with the provided comment.
+  ```json
+  // Example Response
+  "result": {
+    "path": "/sample.exe",
+    "name": "sample.exe",
+    "currentProgram": "sample.exe",
+    "auto_add": true,
+    "added_to_server": false,
+    "checked_out": true,
+    "checked_in": true,
+    "versioned": true,
+    "latest_version": 7,
+    "message": "File synced successfully"
+  }
+  ```
+
+- **`POST /server/version_control/sync-bulk`**: Sync multiple project files in one operation.
+  - Request Payload:
+    - `paths` (required): Comma-separated domain file paths (e.g. `"/a.exe,/b.dll"`).
+    - `comment`, `auto_add`, `keep_checked_out`, `exclusive_checkout`, `force`, `fail_if_modified`, `allow_merge`.
+    - `continue_on_error` (optional, default `true`): Continue remaining files after an item failure.
+  ```json
+  // Example Response
+  "result": {
+    "operation_id": "sync-bulk-1713390000000-4",
+    "timestamp": 1713390000000,
+    "total": 2,
+    "succeeded": 2,
+    "failed": 0,
+    "results": [
+      {
+        "path": "/a.exe",
+        "success": true,
+        "result": {
+          "operation": "sync",
+          "operation_id": "sync-1713390000000-5",
+          "added_to_server": true,
+          "checked_out": true,
+          "checked_in": true
+        }
+      }
+    ]
+  }
+  ```
+
+- **`GET /server/version_control/sync-preflight`**: Dry-run sync plan for a path or current program file.
+  - Query Parameters:
+    - `path` (optional): Target file path.
+    - `current` (optional, default `false`): Use current program DomainFile.
+    - `auto_add` (optional, default `true`).
+  - Returns planned actions such as `would_add`, `would_checkout`, and `would_checkin`.
+
+- **`POST /server/version_control/checkout`**: Check out a versioned file.
+  - Request Payload:
+    - `path` (optional if `current=true`)
+    - `current` (optional, default `false`)
+    - `exclusive` (optional, default `false`)
+
+- **`POST /server/version_control/checkin`**: Check in a checked-out file.
+  - Request Payload:
+    - `path` (optional if `current=true`)
+    - `current` (optional, default `false`)
+    - `comment` (optional)
+    - `keep_checked_out` (optional, default `false`)
+
+- **`POST /server/version_control/undo_checkout`**: Undo checkout for a file.
+  - Request Payload:
+    - `path` (optional if `current=true`)
+    - `current` (optional, default `false`)
+    - `keep` (optional, default `false`): Keep local copy.
+
+- **`GET /server/version_control/file-status`**: Get version-control status for a file.
+  - Query Parameters:
+    - `path` (optional if `current=true`)
+    - `current` (optional, default `false`)
+  - Returns `is_versioned`, `is_checked_out`, `is_checked_out_exclusive`, `version`, `latest_version`, `has_local_changes`, etc.
+
+- **`GET /server/repository/files`**: List repository/project files for server workflows.
+  - Query Parameters:
+    - `folder` (optional, default `/`)
+    - `recursive` (optional, default `true`)
+    - `offset` / `limit` pagination
+
+- **`GET /server/version_history`**: Get version history for a file.
+  - Query Parameters:
+    - `path` (optional if `current=true`)
+    - `current` (optional, default `false`)
+
+Operation/Audit metadata for server operations:
+- Mutating and status/history responses include:
+  - `operation`: operation name (e.g., `sync`, `checkin`, `file-status`)
+  - `operation_id`: unique operation identifier
+  - `timestamp`: server-side epoch milliseconds
+
+Common failure cases for server sync endpoints:
+- `400 NO_PROGRAM_LOADED`: `sync-current` called when no program is active.
+- `404 FILE_NOT_FOUND`: explicit `path` not found for `sync`.
+- `503 NO_PROJECT_OPEN`: no project open in the tool.
+- `500 INTERNAL_ERROR`: project is not shared/connected to a Ghidra Server repository or checkout/checkin operation fails.
+
 ### 2. Program
 
 Represents the current binary loaded in Ghidra.
@@ -318,6 +474,7 @@ Represents functions within the current program.
 - **`PATCH /functions/{address}`**: Modify a function. Addressable only by address. Payload can contain:
   - `name`: New function name.
   - `signature`: Full function signature string (e.g., `void my_func(int p1, char * p2)`).
+    - Signature failures return the parser or type-system rejection reason when available.
   - `comment`: Set/update the function's primary comment.
   ```json
   // Example PATCH payload
@@ -380,7 +537,19 @@ Represents functions within the current program.
   ]
   ```
 - **`GET /functions/{address}/variables`**: List local variables defined within the function. Supports searching by name.
-- **`PATCH /functions/{address}/variables/{variable_name}`**: Modify a local variable (rename, change type). Requires `name` and/or `type` in the payload.
+- **`PATCH /functions/{address}/variables/{variable_name}`**: Modify a local variable (rename, change type).
+  - Request Payload fields:
+    - `name`: New variable name (optional).
+    - `data_type`: New data type name to apply (optional).
+  - At least one of `name` or `data_type` is required.
+  - Returns `404 DATATYPE_NOT_FOUND` if the requested data type cannot be resolved.
+- **`PATCH /functions/{address}/variables/{variable_name}/struct`**: Apply a struct type to a function variable.
+- **`PATCH /functions/by-name/{name}/variables/{variable_name}/struct`**: Name-based variant of the same operation.
+  - Request Payload fields:
+    - `struct_name`: Struct type name to apply (required).
+    - `as_pointer`: Apply as `struct*` when `true`, or as value type when `false` (optional, default: `true`).
+    - `new_name`: Rename variable while applying struct type (optional).
+  - Returns `404 STRUCT_NOT_FOUND` if the struct type cannot be resolved.
 - **`GET /functions/{address}/comments`**: Get comment information at function scope and entry point. Returns `plate`, `decompiler_comment`, `disassembly_comment`, and `eol_comment`.
 - **`PATCH /functions/{address}/comments`**: Set one or more comment types for a function.
   - Request Payload fields (all optional, at least one required):
@@ -689,12 +858,15 @@ Provides functionality for listing and creating custom data types managed by Ghi
 - **`GET /datatypes`**: List data types. Supports pagination and filtering.
   - Query Parameters:
     - `?name=[full_name]`: Return a single data type by exact name match.
+    - `?query=[string]`: Search data types by substring match.
+    - `?exact=true`: When combined with `query`, require an exact match and return `404` when absent.
     - `?offset=[int]`: Number of data types to skip (default: 0).
     - `?limit=[int]`: Maximum number of data types to return (default: 100).
     - `?category=[string]`: Filter by category path substring (e.g. `/winapi`).
     - `?kind=[struct|enum|union]`: Filter by data type kind.
 
   When `name` is provided, the response `result` is a single object instead of a paginated list.
+  When `query` is provided, the response `result` is a filtered list. If `exact=true` and no match exists, the endpoint returns `404 RESOURCE_NOT_FOUND`.
 
   ```json
   // Example Response for GET /datatypes?name=MyStruct
@@ -841,6 +1013,49 @@ Provides raw memory access.
   }
   ```
 - **`PATCH /memory/{address}`**: Write bytes to memory. Requires `bytes` (in specified `format`) and `format` in the payload. Use with extreme caution.
+
+- **`GET /memory/blocks`**: List memory blocks with address ranges and permission flags.
+- **`POST /memory/blocks`**: Create a new named memory block mapping.
+  - Request Payload:
+    - `name` (required): Block/mapping name.
+    - `address` (required): Start address.
+    - `size` (required): Block size in bytes.
+    - `readable` (optional, default `true`): Read permission.
+    - `writable` (optional, default `false`): Write permission.
+    - `executable` (optional, default `false`): Execute permission.
+    - `initialized` (optional, default `false`): Create initialized block.
+  ```json
+  // Example Request
+  {
+    "name": "devicename",
+    "address": "0xF0000000",
+    "size": "4096",
+    "readable": "true",
+    "writable": "true",
+    "executable": "false",
+    "initialized": "false"
+  }
+
+  // Example Response
+  {
+    "success": true,
+    "result": {
+      "name": "devicename",
+      "start": "f0000000",
+      "end": "f0000fff",
+      "size": 4096,
+      "permissions": "rw--",
+      "isInitialized": false,
+      "isLoaded": true,
+      "isMapped": false
+    },
+    "_links": {
+      "self": { "href": "/memory/blocks" },
+      "memory": { "href": "/memory" },
+      "segments": { "href": "/segments" }
+    }
+  }
+  ```
 
 - **`POST /memory/{address}/background-color`** (or **`PATCH`**): Set a background color for a specific address.
   - Request Payload:
