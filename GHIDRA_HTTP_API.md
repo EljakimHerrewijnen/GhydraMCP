@@ -449,6 +449,21 @@ Represents functions within the current program.
   ]
   ```
 - **`POST /functions`**: Create a function at a specific address. Requires `address` in the request body. Returns the created function resource.
+  ```json
+  // Example Request Payload
+  {
+    "address": "0x4010a0"
+  }
+
+  // Example Response
+  "result": {
+    "name": "FUN_4010A0",
+    "address": "0x4010a0",
+    "signature": "int FUN_4010A0(void)",
+    "size": 64,
+    "message": "Function created successfully"
+  }
+  ```
 - **`GET /functions/{address}`**: Get details for a specific function (name, signature, size, stack info, etc.).
   ```json
   // Example Response Fragment for GET /functions/0x4010a0
@@ -473,12 +488,39 @@ Represents functions within the current program.
   ```
 - **`PATCH /functions/{address}`**: Modify a function. Addressable only by address. Payload can contain:
   - `name`: New function name.
-  - `signature`: Full function signature string (e.g., `void my_func(int p1, char * p2)`).
+  - `signature`: Full C-style function prototype string (e.g., `void my_func(int p1, char * p2)`).
+    - **This is the primary mechanism to set or change a function's return type and parameter types.**
+      Provide the complete prototype — Ghidra's `FunctionSignatureParser` applies the return type,
+      parameter names, and parameter types atomically. Struct pointer return types and nested struct
+      parameters are fully supported (the struct must already exist in the type database).
+    - Example: `"some_struct * clear_some_struct(some_struct input, bool check_empty)"` sets:
+      - Return type → `some_struct *`
+      - Parameter 0 → name `input`, type `some_struct`
+      - Parameter 1 → name `check_empty`, type `bool`
     - Signature failures return the parser or type-system rejection reason when available.
   - `comment`: Set/update the function's primary comment.
   ```json
-  // Example PATCH payload
-  { "name": "calculate_checksum", "signature": "uint32_t calculate_checksum(uint8_t* buffer, size_t length)" }
+  // Example PATCH payload — rename and retype a function in one request
+  {
+    "name": "clear_some_struct",
+    "signature": "some_struct * clear_some_struct(some_struct input, bool check_empty)"
+  }
+  ```
+  ```json
+  // Example Response
+  {
+    "success": true,
+    "result": {
+      "name": "clear_some_struct",
+      "address": "0x401234",
+      "signature": "some_struct * clear_some_struct(some_struct input, bool check_empty)",
+      "returnType": "some_struct *",
+      "parameters": [
+        { "name": "input", "dataType": "some_struct", "ordinal": 0 },
+        { "name": "check_empty", "dataType": "bool", "ordinal": 1 }
+      ]
+    }
+  }
   ```
 - **`DELETE /functions/{address}`**: Delete the function definition at the specified address.
 
@@ -532,36 +574,139 @@ Represents functions within the current program.
   // Example Response Fragment
   "result": [
     { "address": "0x4010a0", "mnemonic": "PUSH", "operands": "RBP", "bytes": "55" },
-    { "address": "0x4010a1", "mnemonic": "MOV", "operands": "RBP, RSP", "bytes": "4889E5" },
-    // ... more instructions
+    { "address": "0x4010a1", "mnemonic": "MOV", "operands": "RBP, RSP", "bytes": "4889E5" }
   ]
   ```
 - **`GET /functions/{address}/variables`**: List local variables defined within the function. Supports searching by name.
+  ```json
+  // Example Response
+  "result": [
+    {
+      "name": "param_1",
+      "dataType": "char *",
+      "storage": "stack",
+      "ordinal": 0,
+      "address": "0x4010a8"
+    },
+    {
+      "name": "local_flag",
+      "dataType": "int",
+      "storage": "stack",
+      "ordinal": 1,
+      "address": "0x4010b0"
+    }
+  ]
+  ```
 - **`PATCH /functions/{address}/variables/{variable_name}`**: Modify a local variable (rename, change type).
   - Request Payload fields:
     - `name`: New variable name (optional).
     - `data_type`: New data type name to apply (optional).
   - At least one of `name` or `data_type` is required.
   - Returns `404 DATATYPE_NOT_FOUND` if the requested data type cannot be resolved.
+  ```json
+  // Example Request Payload
+  {
+    "name": "packet_count",
+    "data_type": "uint32_t"
+  }
+
+  // Example Response
+  "result": {
+    "name": "packet_count",
+    "dataType": "uint32_t",
+    "address": "0x4010b0",
+    "message": "Variable updated successfully"
+  }
+  ```
 - **`PATCH /functions/{address}/variables/{variable_name}/struct`**: Apply a struct type to a function variable.
+  ```json
+  // Example Request Payload
+  {
+    "struct_name": "NetworkPacket",
+    "as_pointer": true,
+    "new_name": "packet_ptr"
+  }
+
+  // Example Response
+  "result": {
+    "name": "packet_ptr",
+    "dataType": "NetworkPacket *",
+    "address": "0x4010a8",
+    "message": "Struct applied to variable successfully"
+  }
+  ```
 - **`PATCH /functions/by-name/{name}/variables/{variable_name}/struct`**: Name-based variant of the same operation.
   - Request Payload fields:
     - `struct_name`: Struct type name to apply (required).
     - `as_pointer`: Apply as `struct*` when `true`, or as value type when `false` (optional, default: `true`).
     - `new_name`: Rename variable while applying struct type (optional).
   - Returns `404 STRUCT_NOT_FOUND` if the struct type cannot be resolved.
+  ```json
+  // Example Request Payload
+  {
+    "struct_name": "NetworkPacket",
+    "as_pointer": false,
+    "new_name": "packet_value"
+  }
+  ```
 - **`GET /functions/{address}/comments`**: Get comment information at function scope and entry point. Returns `plate`, `decompiler_comment`, `disassembly_comment`, and `eol_comment`.
+  ```json
+  // Example Response
+  "result": {
+    "plate": "Main processing routine",
+    "decompiler_comment": "Handles packet parsing and dispatch.",
+    "disassembly_comment": "Entry comment for disassembly.",
+    "eol_comment": "Return value is status code."
+  }
+  ```
 - **`PATCH /functions/{address}/comments`**: Set one or more comment types for a function.
   - Request Payload fields (all optional, at least one required):
     - `plate`: Function plate comment.
     - `decompiler_comment`: Pre-comment at function entry (decompiler-friendly).
     - `disassembly_comment`: EOL comment at function entry.
     - `eol_comment`: Alias for setting EOL comment at function entry.
+  ```json
+  // Example Request Payload
+  {
+    "plate": "Packet processing entry",
+    "eol_comment": "Returns zero on success"
+  }
+
+  // Example Response
+  "result": {
+    "address": "0x4010a0",
+    "message": "Comments updated successfully"
+  }
+  ```
 - **`DELETE /functions/{address}/comments`**: Clear comments for a function.
   - Query Parameters:
     - `?type=[all|plate|decompiler|disassembly|eol]` (default: `all`)
+  ```json
+  // Example Request
+  DELETE /functions/0x4010a0/comments?type=eol
+
+  // Example Response
+  "result": {
+    "address": "0x4010a0",
+    "message": "EOL comments cleared"
+  }
+  ```
 - **`GET /functions/{address}/callers`**: List functions that call the specified function. Supports pagination (`?offset=`, `?limit=`).
+  ```json
+  // Example Response
+  "result": [
+    { "name": "dispatch_packet", "address": "0x401020" },
+    { "name": "handle_input", "address": "0x401080" }
+  ]
+  ```
 - **`GET /functions/{address}/callees`**: List functions called by the specified function. Supports pagination (`?offset=`, `?limit=`).
+  ```json
+  // Example Response
+  "result": [
+    { "name": "parse_header", "address": "0x401100" },
+    { "name": "compute_checksum", "address": "0x401140" }
+  ]
+  ```
 - **`GET /functions/{address}/hash`**: Compute a normalized SHA-256 hash for the function body, suitable for cross-binary matching where raw addresses may differ.
   ```json
   // Example Response
@@ -578,20 +723,157 @@ Represents functions within the current program.
 Represents named locations (functions, data, labels).
 
 - **`GET /symbols`**: List all symbols in the program. Supports searching (by name/address/regex) and pagination. Can filter by type (`?type=function`, `?type=data`, `?type=label`).
+  ```json
+  // Example Response
+  "result": [
+    { "address": "0x00401234", "name": "data_buffer", "type": "data" },
+    { "address": "0x00402000", "name": "main", "type": "function" }
+  ]
+  ```
 - **`POST /symbols`**: Create or rename a symbol at a specific address. Requires `address` and `name` in the payload. If a symbol exists, it's renamed; otherwise, a new label is created.
+  ```json
+  // Example Request Payload
+  {
+    "address": "0x00401234",
+    "name": "packet_buffer"
+  }
+
+  // Example Response
+  "result": {
+    "address": "0x00401234",
+    "name": "packet_buffer",
+    "namespace": "",
+    "message": "Symbol created successfully"
+  }
+  ```
 - **`GET /symbols/{address}`**: Get details of the symbol at the specified address.
+  ```json
+  // Example Response
+  "result": {
+    "address": "0x00401234",
+    "name": "data_buffer",
+    "type": "data",
+    "namespace": "",
+    "isPrimary": true
+  }
+  ```
 - **`PATCH /symbols/{address}`**: Modify properties of the symbol (e.g., set as primary, change namespace). Payload specifies changes.
+  ```json
+  // Example Request Payload
+  {
+    "name": "packet_buffer",
+    "namespace": "global",
+    "isPrimary": true
+  }
+
+  // Example Response
+  "result": {
+    "address": "0x00401234",
+    "name": "packet_buffer",
+    "namespace": "global",
+    "isPrimary": true,
+    "message": "Symbol updated successfully"
+  }
+  ```
 - **`DELETE /symbols/{address}`**: Remove the symbol at the specified address.
+  ```json
+  // Example Request
+  DELETE /symbols/0x00401234
+
+  // Example Response
+  "result": {
+    "address": "0x00401234",
+    "message": "Symbol deleted successfully"
+  }
+  ```
 
 ### 6. Data
 
 Represents defined data items in memory.
 
 - **`GET /data`**: List defined data items. Supports searching (by name/address/regex) and pagination. Can filter by type (`?type=string`, `?type=dword`, etc.).
+  ```json
+  // Example Response
+  "result": [
+    { "address": "0x00401234", "dataType": "int", "size": 4, "name": "counter" },
+    { "address": "0x00402000", "dataType": "string", "size": 16, "name": "packet_buffer" }
+  ]
+  ```
 - **`POST /data`**: Define a new data item. Requires `address`, `type`, and optionally `size` or `length` in the payload.
+  ```json
+  // Example Request Payload
+  {
+    "address": "0x00401234",
+    "type": "int"
+  }
+
+  // Example Response
+  "result": {
+    "address": "0x00401234",
+    "dataType": "int",
+    "size": 4,
+    "message": "Data created successfully"
+  }
+  ```
+- **`POST /data/region`**: Create a typed data region at the specified address. Requires `address`, `type`, and `size`. Optionally accepts `name` to label the start of the region.
+  ```json
+  // Example Request Payload
+  {
+    "address": "0x00402000",
+    "type": "char",
+    "size": 64,
+    "name": "packet_buffer"
+  }
+
+  // Example Response
+  "result": {
+    "address": "0x00402000",
+    "dataType": "char",
+    "size": 64,
+    "name": "packet_buffer",
+    "message": "Data region created successfully"
+  }
+  ```
 - **`GET /data/{address}`**: Get details of the data item at the specified address (type, size, value representation).
-- **`PATCH /data/{address}`**: Modify a data item (e.g., change `name`, `type`, `comment`). Payload specifies changes.
+  ```json
+  // Example Response
+  "result": {
+    "address": "0x00401234",
+    "dataType": "int",
+    "size": 4,
+    "value": "0x00000000",
+    "name": "counter"
+  }
+  ```
+- **`PATCH /data/{address}`**: Modify a data item (e.g., change `name`, `type`, `size`, `comment`). Payload specifies changes.
+  ```json
+  // Example Request Payload
+  {
+    "type": "char *",
+    "size": 16,
+    "name": "packet_label"
+  }
+
+  // Example Response
+  "result": {
+    "address": "0x00401238",
+    "dataType": "char *",
+    "size": 16,
+    "name": "packet_label",
+    "message": "Data item updated successfully"
+  }
+  ```
 - **`DELETE /data/{address}`**: Undefine the data item at the specified address.
+  ```json
+  // Example Request
+  DELETE /data/0x00401234
+
+  // Example Response
+  "result": {
+    "address": "0x00401234",
+    "message": "Data item deleted successfully"
+  }
+  ```
 
 ### 6.1 Strings
 

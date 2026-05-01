@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added SHA-256 checksum generation for release artifacts.
 - Added `segments_map` MCP bridge tool to produce an ordered memory segment map and optionally resolve an address to its containing segment.
 - Added support for creating named memory block mappings via `POST /memory/blocks` and MCP tool `memory_map_add` with configurable RWX permissions.
+- Added typed data region creation via `POST /data/region` and MCP tool `data_create_region`.
+- Extended data type application to support optional `size` with `PATCH /data/{address}`/`data_set_type` for array/string region sizing.
 
 ### Changed
 - GitHub Actions can now build release-labeled zip assets on manual dispatch and publish them on tag builds.

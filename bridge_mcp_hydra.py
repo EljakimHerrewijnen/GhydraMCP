@@ -3170,12 +3170,13 @@ def data_delete(address: str, port: int = None) -> dict:
 
 @mcp.tool()
 @text_output
-def data_set_type(address: str, data_type: str, port: int = None) -> dict:
+def data_set_type(address: str, data_type: str, size: int = None, port: int = None) -> dict:
     """Set the data type of a data item
 
     Args:
         address: Memory address in hex format
         data_type: Data type name (e.g. "uint32_t", "char[10]")
+        size: Optional size in bytes when applying an array or string type
         port: Specific Ghidra instance port (optional)
 
     Returns:
@@ -3193,7 +3194,48 @@ def data_set_type(address: str, data_type: str, port: int = None) -> dict:
 
     port = _get_instance_port(port)
 
-    response = safe_patch(port, f"data/{address}/type", {"type": data_type})
+    payload = {"type": data_type}
+    if size is not None:
+        payload["size"] = size
+
+    response = safe_patch(port, f"data/{address}/type", payload)
+    return simplify_response(response)
+
+@mcp.tool()
+@text_output
+def data_create_region(address: str, data_type: str, size: int, name: str = None, port: int = None) -> dict:
+    """Create a typed data region at the specified address range
+
+    Args:
+        address: Memory address in hex format
+        data_type: Data type name (e.g. "MyStruct", "string")
+        size: Size in bytes for the region
+        name: Optional label to apply at the start address
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Operation result with the created data region information
+    """
+    if not address or not data_type or size is None:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Address, data_type, and size parameters are required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+
+    payload = {
+        "type": data_type,
+        "size": size
+    }
+    if name:
+        payload["name"] = name
+
+    response = safe_post(port, "data/region", payload)
     return simplify_response(response)
 
 # Struct tools

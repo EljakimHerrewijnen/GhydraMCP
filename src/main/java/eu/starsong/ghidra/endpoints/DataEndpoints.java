@@ -1,15 +1,14 @@
 package eu.starsong.ghidra.endpoints;
 
-    import com.google.gson.JsonObject;
     import com.sun.net.httpserver.HttpExchange;
     import com.sun.net.httpserver.HttpServer;
-    import eu.starsong.ghidra.api.ResponseBuilder;
     import eu.starsong.ghidra.util.GhidraUtil;
     import eu.starsong.ghidra.util.HttpUtil;
     import eu.starsong.ghidra.util.TransactionHelper;
     import eu.starsong.ghidra.util.TransactionHelper.TransactionException;
     import ghidra.program.model.address.Address;
     import ghidra.framework.plugintool.PluginTool;
+    import ghidra.program.model.data.*;
     import ghidra.program.model.listing.Data;
     import ghidra.program.model.listing.DataIterator;
     import ghidra.program.model.listing.Listing;
@@ -22,24 +21,21 @@ package eu.starsong.ghidra.endpoints;
 
     import java.io.IOException;
     import java.util.*;
-    import java.util.concurrent.atomic.AtomicBoolean;
-    import javax.swing.SwingUtilities;
-    import java.lang.reflect.InvocationTargetException;
 
     public class DataEndpoints extends AbstractEndpoint {
 
         private PluginTool tool;
-        
+
         // Updated constructor to accept port
         public DataEndpoints(Program program, int port) {
             super(program, port); // Call super constructor
         }
-        
+
         public DataEndpoints(Program program, int port, PluginTool tool) {
             super(program, port);
             this.tool = tool;
         }
-        
+
         @Override
         protected PluginTool getTool() {
             return tool;
@@ -70,6 +66,14 @@ package eu.starsong.ghidra.endpoints;
                 if ("POST".equals(exchange.getRequestMethod()) || "PATCH".equals(exchange.getRequestMethod())) {
                     Map<String, String> params = parseJsonPostParams(exchange);
                     handleTypeChangeData(exchange, params);
+                } else {
+                    sendErrorResponse(exchange, 405, "Method Not Allowed");
+                }
+            }, port));
+            server.createContext("/data/region", HttpUtil.safeHandler(exchange -> {
+                if ("POST".equals(exchange.getRequestMethod())) {
+                    Map<String, String> params = parseJsonPostParams(exchange);
+                    handleCreateData(exchange, params);
                 } else {
                     sendErrorResponse(exchange, 405, "Method Not Allowed");
                 }
@@ -200,13 +204,13 @@ package eu.starsong.ghidra.endpoints;
                 Map<String, String> qparams = parseQueryParams(exchange);
                 int offset = parseIntOrDefault(qparams.get("offset"), 0);
                 int limit = parseIntOrDefault(qparams.get("limit"), 100);
-                
+
                 Program program = getCurrentProgram();
                 if (program == null) {
                     sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                     return;
                 }
-                
+
                 List<Map<String, Object>> dataItems = new ArrayList<>();
                 for (MemoryBlock block : program.getMemory().getBlocks()) {
                     DataIterator it = program.getListing().getDefinedData(block.getStart(), true);
@@ -224,32 +228,32 @@ package eu.starsong.ghidra.endpoints;
                             item.put("name", data.getLabel() != null ? data.getLabel() : "(unnamed)");
                             item.put("value", data.getDefaultValueRepresentation());
                             item.put("dataType", data.getDataType().getName());
-                            
+
                             // Add HATEOAS links
                             Map<String, Object> links = new HashMap<>();
                             Map<String, String> selfLink = new HashMap<>();
                             selfLink.put("href", "/data/" + data.getAddress().toString());
                             links.put("self", selfLink);
                             item.put("_links", links);
-                            
+
                             dataItems.add(item);
                         }
                     }
                 }
-                
+
                 // Build response with HATEOAS links
                 eu.starsong.ghidra.api.ResponseBuilder builder = new eu.starsong.ghidra.api.ResponseBuilder(exchange, port)
                     .success(true);
-                
+
                 // Apply pagination and get paginated items
                 List<Map<String, Object>> paginated = applyPagination(dataItems, offset, limit, builder, "/data");
-                
+
                 // Set the paginated result
                 builder.result(paginated);
-                
+
                 // Add program link
                 builder.addLink("program", "/program");
-                
+
                 sendJsonResponse(exchange, builder.build(), 200);
             } catch (Exception e) {
                 Msg.error(this, "Error listing data", e);
@@ -264,13 +268,13 @@ package eu.starsong.ghidra.endpoints;
                 final String newName = params.containsKey("newName") ? params.get("newName") :
                                        params.containsKey("name") ? params.get("name") : null;
                 final String dataTypeStr = params.get("type");
-                
+
                 // Address is always required
                 if (addressStr == null || addressStr.isEmpty()) {
                     sendErrorResponse(exchange, 400, "Missing required parameter: address", "MISSING_PARAMETERS");
                     return;
                 }
-                
+
                 // Either newName or type or both must be provided
                 if ((newName == null || newName.isEmpty()) && (dataTypeStr == null || dataTypeStr.isEmpty())) {
                     sendErrorResponse(exchange, 400, "At least one of newName or type must be provided", "MISSING_PARAMETERS");
@@ -287,7 +291,7 @@ package eu.starsong.ghidra.endpoints;
                     // Create a result map to collect operation results
                     Map<String, Object> resultMap = new HashMap<>();
                     resultMap.put("address", addressStr);
-                    
+
                     TransactionHelper.executeInTransaction(program, "Update data at " + addressStr, () -> {
                         // Get the data at the address first
                         Address addr = program.getAddressFactory().getAddress(addressStr);
@@ -308,48 +312,48 @@ package eu.starsong.ghidra.endpoints;
                                 currentName = sym.getName();
                             }
                         }
-                        
+
                         // If we need to set a data type
                         if (dataTypeStr != null && !dataTypeStr.isEmpty()) {
                             ghidra.program.model.data.DataType dataType = GhidraUtil.resolveDataType(program, dataTypeStr);
                             if (dataType == null) {
                                 throw new Exception("Could not find or parse data type: " + dataTypeStr);
                             }
-                            
+
                             // Apply the data type
                             try {
                                 // Clear any existing data first
                                 listing.clearCodeUnits(addr, addr.add(data.getLength() - 1), false);
-                                
+
                                 // Create new data with the type
                                 Data newData = listing.createData(addr, dataType);
                                 if (newData == null) {
                                     throw new Exception("Failed to apply data type " + dataTypeStr + " at " + addressStr);
                                 }
-                                
+
                                 // Capture info for response
                                 resultMap.put("dataType", dataTypeStr);
                                 resultMap.put("originalType", data.getDataType().getName());
-                                
+
                                 // Update our reference to the data
                                 data = newData;
                             } catch (Exception e) {
                                 throw new Exception("Error applying data type: " + e.getMessage(), e);
                             }
                         }
-                        
+
                         // Handle renaming if needed
                         if (newName != null && !newName.isEmpty()) {
                             SymbolTable symTable = program.getSymbolTable();
                             Symbol symbol = symTable.getPrimarySymbol(addr);
-                            
+
                             if (symbol != null) {
                                 symbol.setName(newName, SourceType.USER_DEFINED);
                             } else {
                                 // Create a new label if no primary symbol exists
                                 symTable.createLabel(addr, newName, SourceType.USER_DEFINED);
                             }
-                            
+
                             resultMap.put("name", newName);
                             if (currentName != null) {
                                 resultMap.put("originalName", currentName);
@@ -358,7 +362,7 @@ package eu.starsong.ghidra.endpoints;
                             // If we didn't rename but have a name from data type change, preserve it
                             SymbolTable symTable = program.getSymbolTable();
                             Symbol symbol = symTable.getPrimarySymbol(addr);
-                            
+
                             if (symbol == null || !symbol.getName().equals(currentName)) {
                                 if (symbol != null) {
                                     symbol.setName(currentName, SourceType.USER_DEFINED);
@@ -366,13 +370,13 @@ package eu.starsong.ghidra.endpoints;
                                     symTable.createLabel(addr, currentName, SourceType.USER_DEFINED);
                                 }
                             }
-                            
+
                             resultMap.put("name", currentName);
                         }
-                        
+
                         return null; // Return null for void operation
                     });
-                    
+
                     // Add a meaningful message
                     String message;
                     if (newName != null && !newName.isEmpty() && dataTypeStr != null && !dataTypeStr.isEmpty()) {
@@ -383,17 +387,17 @@ package eu.starsong.ghidra.endpoints;
                         message = "Data type changed successfully";
                     }
                     resultMap.put("message", message);
-                    
+
                     // Build HATEOAS response
                     eu.starsong.ghidra.api.ResponseBuilder builder = new eu.starsong.ghidra.api.ResponseBuilder(exchange, port)
                         .success(true)
                         .result(resultMap);
-                    
+
                     // Add relevant links
                     builder.addLink("self", "/data/" + addressStr);
                     builder.addLink("data", "/data");
                     builder.addLink("program", "/program");
-                    
+
                     sendJsonResponse(exchange, builder.build(), 200);
                 } catch (TransactionException e) {
                     Msg.error(this, "Transaction failed: Update Data", e);
@@ -412,37 +416,6 @@ package eu.starsong.ghidra.endpoints;
         }
 
 
-        private boolean renameDataAtAddress(Program program, String addressStr, String newName) throws Exception {
-            // This method now throws Exception to be caught by the transaction helper
-            AtomicBoolean successFlag = new AtomicBoolean(false);
-            try {
-                Address addr = program.getAddressFactory().getAddress(addressStr);
-                Listing listing = program.getListing();
-                Data data = listing.getDefinedDataAt(addr);
-                if (data != null) {
-                    SymbolTable symTable = program.getSymbolTable();
-                    Symbol symbol = symTable.getPrimarySymbol(addr);
-                    if (symbol != null) {
-                        symbol.setName(newName, SourceType.USER_DEFINED);
-                        successFlag.set(true);
-                    } else {
-                        // Create a new label if no primary symbol exists
-                        symTable.createLabel(addr, newName, SourceType.USER_DEFINED);
-                        successFlag.set(true);
-                    }
-                } else {
-                     throw new Exception("No defined data found at address: " + addressStr);
-                }
-            } catch (ghidra.program.model.address.AddressFormatException afe) {
-                 throw new Exception("Invalid address format: " + addressStr, afe);
-            } catch (ghidra.util.exception.InvalidInputException iie) {
-                 throw new Exception("Invalid name: " + newName, iie);
-            } catch (Exception e) { // Catch other potential Ghidra exceptions
-                 throw new Exception("Failed to rename data at " + addressStr, e);
-            }
-            return successFlag.get();
-        }
-        
         /**
          * Handle a data type change request (without renaming)
          */
@@ -454,46 +427,65 @@ package eu.starsong.ghidra.endpoints;
                     debugInfo.append(entry.getKey()).append("=").append(entry.getValue()).append(", ");
                 }
                 Msg.info(this, debugInfo.toString());
-                
+
                 final String addressStr = params.get("address");
                 final String dataTypeStr = params.get("type");
-                
-                Msg.info(this, "handleTypeChangeData - extracted parameters: address=" + addressStr + 
-                               ", type=" + dataTypeStr);
-                
+                final String sizeStr = params.get("size");
+
+                Msg.info(this, "handleTypeChangeData - extracted parameters: address=" + addressStr +
+                               ", type=" + dataTypeStr + ", size=" + sizeStr);
+
+                Integer parsedSize = null;
+                if (sizeStr != null && !sizeStr.isEmpty()) {
+                    try {
+                        parsedSize = Integer.parseInt(sizeStr);
+                        if (parsedSize <= 0) {
+                            sendErrorResponse(exchange, 400, "Size must be a positive integer", "INVALID_PARAMETER");
+                            return;
+                        }
+                    } catch (NumberFormatException ex) {
+                        sendErrorResponse(exchange, 400, "Invalid size parameter: must be an integer", "INVALID_PARAMETER");
+                        return;
+                    }
+                }
+                final Integer size = parsedSize;
+
                 if (addressStr == null || addressStr.isEmpty()) {
                     Msg.info(this, "handleTypeChangeData - Missing required parameter: address");
                     sendErrorResponse(exchange, 400, "Missing required parameter: address", "MISSING_PARAMETERS");
                     return;
                 }
-                
+
                 if (dataTypeStr == null || dataTypeStr.isEmpty()) {
                     sendErrorResponse(exchange, 400, "Missing required parameter: type", "MISSING_PARAMETERS");
                     return;
                 }
-                
+
                 Program program = getCurrentProgram();
                 if (program == null) {
                     sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                     return;
                 }
-                
+
                 try {
                     // Create a result map to collect operation results
                     Map<String, Object> resultMap = new HashMap<>();
                     resultMap.put("address", addressStr);
                     resultMap.put("dataType", dataTypeStr);
-                    
+                    if (size != null) {
+                        resultMap.put("size", size);
+                    }
+
                     TransactionHelper.executeInTransaction(program, "Change data type at " + addressStr, () -> {
                         // Get the data at the address first
                         Address addr = program.getAddressFactory().getAddress(addressStr);
                         Listing listing = program.getListing();
                         Data data = listing.getDefinedDataAt(addr);
-                        
+
                         if (data == null) {
                             throw new Exception("No defined data found at address: " + addressStr);
                         }
-                        
+
                         // Get current name to preserve after type change
                         String currentName = null;
                         Symbol symbol = program.getSymbolTable().getPrimarySymbol(addr);
@@ -501,53 +493,60 @@ package eu.starsong.ghidra.endpoints;
                             currentName = symbol.getName();
                             resultMap.put("originalName", currentName);
                         }
-                        
+
                         // Remember original data type
                         String originalType = data.getDataType().getName();
                         resultMap.put("originalType", originalType);
-                        
+
                         ghidra.program.model.data.DataType dataType = GhidraUtil.resolveDataType(program, dataTypeStr);
                         if (dataType == null) {
                             throw new Exception("Could not find or parse data type: " + dataTypeStr);
                         }
 
+                        DataType finalDataType = applySizeToDataType(program, dataType, size, dataTypeStr);
+
                         // Clear existing data - need to clear enough space for the new data type
-                        // Use the LARGER of the old data length or new data type length
+                        // Use the larger of the old data length or new data type length
                         int oldLength = data.getLength();
-                        int newLength = dataType.getLength();
+                        int newLength = finalDataType.getLength();
                         int lengthToClear = Math.max(oldLength, newLength > 0 ? newLength : oldLength);
 
                         // Clear the required space
                         listing.clearCodeUnits(addr, addr.add(lengthToClear - 1), false);
 
                         // Create new data
-                        Data newData = listing.createData(addr, dataType);
+                        Data newData;
+                        if (finalDataType instanceof StringDataType && size != null && size > 0) {
+                            newData = listing.createData(addr, (StringDataType) finalDataType, size.intValue());
+                        } else {
+                            newData = listing.createData(addr, finalDataType);
+                        }
                         if (newData == null) {
                             throw new Exception("Failed to create data with type " + dataTypeStr);
                         }
-                        
+
                         // Preserve the original name
                         if (currentName != null) {
                             SymbolTable symTable = program.getSymbolTable();
                             symTable.createLabel(addr, currentName, SourceType.USER_DEFINED);
                             resultMap.put("name", currentName);
                         }
-                        
+
                         return null;
                     });
-                    
+
                     resultMap.put("message", "Data type changed successfully");
-                    
+
                     // Build HATEOAS response
                     eu.starsong.ghidra.api.ResponseBuilder builder = new eu.starsong.ghidra.api.ResponseBuilder(exchange, port)
                         .success(true)
                         .result(resultMap);
-                    
+
                     // Add relevant links
                     builder.addLink("self", "/data/" + addressStr);
                     builder.addLink("data", "/data");
                     builder.addLink("program", "/program");
-                    
+
                     sendJsonResponse(exchange, builder.build(), 200);
                 } catch (TransactionException e) {
                     Msg.error(this, "Transaction failed: Change Data Type", e);
@@ -564,48 +563,81 @@ package eu.starsong.ghidra.endpoints;
                 sendErrorResponse(exchange, 500, "Error changing data type: " + e.getMessage(), "INTERNAL_ERROR");
             }
         }
-        
-        /**
-         * Handle a combined update request (both name and type)
-         */
+
+    private DataType applySizeToDataType(Program program, DataType dataType, Integer size, String originalTypeName) throws Exception {
+        if (size == null) {
+            return dataType;
+        }
+
+        if (dataType == null) {
+            throw new Exception("Data type is not resolved for size application");
+        }
+
+        int baseLength = dataType.getLength();
+        if (baseLength <= 0) {
+            String lowered = originalTypeName != null ? originalTypeName.toLowerCase() : "";
+            if (dataType instanceof StringDataType || lowered.contains("string")) {
+                return dataType;
+            }
+            if (dataType instanceof ArrayDataType) {
+                return dataType;
+            }
+            throw new Exception("Cannot apply explicit size to variable-length type: " + originalTypeName);
+        }
+
+        if (baseLength == size) {
+            return dataType;
+        }
+
+        if (size % baseLength == 0) {
+            int count = size / baseLength;
+            return new ArrayDataType(dataType, count, baseLength);
+        }
+
+        if (dataType instanceof StringDataType || originalTypeName.toLowerCase().contains("string")) {
+            return dataType;
+        }
+
+        throw new Exception("Specified size " + size + " is not a multiple of the base type length " + baseLength + " for type " + originalTypeName);
+    }
+
         public void handleUpdateData(HttpExchange exchange, Map<String, String> params) throws IOException {
             try {
-                // Debug - log all parameters received by this method
                 StringBuilder debugInfo = new StringBuilder("DEBUG handleUpdateData - Received parameters: ");
                 for (Map.Entry<String, String> entry : params.entrySet()) {
                     debugInfo.append(entry.getKey()).append("=").append(entry.getValue()).append(", ");
                 }
                 Msg.info(this, debugInfo.toString());
-                
+
                 final String addressStr = params.get("address");
                 final String newName = params.get("newName");
                 final String dataTypeStr = params.get("type");
-                
-                Msg.info(this, "handleUpdateData - extracted parameters: address=" + addressStr + 
+
+                Msg.info(this, "handleUpdateData - extracted parameters: address=" + addressStr +
                                ", newName=" + newName + ", type=" + dataTypeStr);
-                
+
                 if (addressStr == null || addressStr.isEmpty()) {
                     Msg.info(this, "handleUpdateData - Missing required parameter: address");
                     sendErrorResponse(exchange, 400, "Missing required parameter: address", "MISSING_PARAMETERS");
                     return;
                 }
-                
+
                 if ((newName == null || newName.isEmpty()) && (dataTypeStr == null || dataTypeStr.isEmpty())) {
                     sendErrorResponse(exchange, 400, "Missing required parameters: at least one of newName or type must be provided", "MISSING_PARAMETERS");
                     return;
                 }
-                
+
                 Program program = getCurrentProgram();
                 if (program == null) {
                     sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                     return;
                 }
-                
+
                 try {
                     // Create a result map to collect operation results
                     Map<String, Object> resultMap = new HashMap<>();
                     resultMap.put("address", addressStr);
-                    
+
                     TransactionHelper.executeInTransaction(program, "Update data at " + addressStr, () -> {
                         // Get the data at the address first
                         Address addr = program.getAddressFactory().getAddress(addressStr);
@@ -623,7 +655,7 @@ package eu.starsong.ghidra.endpoints;
                             currentName = symbol.getName();
                             resultMap.put("originalName", currentName);
                         }
-                        
+
                         // Handle type change if requested
                         if (dataTypeStr != null && !dataTypeStr.isEmpty()) {
                             // Remember original type
@@ -634,56 +666,56 @@ package eu.starsong.ghidra.endpoints;
                             if (dataType == null) {
                                 throw new Exception("Could not find or parse data type: " + dataTypeStr);
                             }
-                            
+
                             // Apply the data type
                             try {
                                 // Clear existing data
                                 int length = data.getLength();
                                 listing.clearCodeUnits(addr, addr.add(length - 1), false);
-                                
+
                                 // Create new data with the type
                                 Data newData = listing.createData(addr, dataType);
                                 if (newData == null) {
                                     throw new Exception("Failed to create data with type " + dataTypeStr);
                                 }
-                                
+
                                 resultMap.put("dataType", dataTypeStr);
-                                
+
                                 // Update our reference to the data
                                 data = newData;
                             } catch (Exception e) {
                                 throw new Exception("Error applying data type: " + e.getMessage(), e);
                             }
                         }
-                        
+
                         // Handle rename if requested
                         if (newName != null && !newName.isEmpty()) {
                             SymbolTable symTable = program.getSymbolTable();
                             Symbol currentSymbol = symTable.getPrimarySymbol(addr);
-                            
+
                             if (currentSymbol != null) {
                                 currentSymbol.setName(newName, SourceType.USER_DEFINED);
                             } else {
                                 // Create a new label if no primary symbol exists
                                 symTable.createLabel(addr, newName, SourceType.USER_DEFINED);
                             }
-                            
+
                             resultMap.put("name", newName);
                         } else if (currentName != null) {
                             // If we didn't rename but need to preserve name after type change
                             SymbolTable symTable = program.getSymbolTable();
                             Symbol currentSymbol = symTable.getPrimarySymbol(addr);
-                            
+
                             if (currentSymbol == null) {
                                 symTable.createLabel(addr, currentName, SourceType.USER_DEFINED);
                             }
-                            
+
                             resultMap.put("name", currentName);
                         }
-                        
+
                         return null;
                     });
-                    
+
                     // Add a meaningful message
                     String message;
                     if (newName != null && !newName.isEmpty() && dataTypeStr != null && !dataTypeStr.isEmpty()) {
@@ -694,17 +726,17 @@ package eu.starsong.ghidra.endpoints;
                         message = "Data type changed successfully";
                     }
                     resultMap.put("message", message);
-                    
+
                     // Build HATEOAS response
                     eu.starsong.ghidra.api.ResponseBuilder builder = new eu.starsong.ghidra.api.ResponseBuilder(exchange, port)
                         .success(true)
                         .result(resultMap);
-                    
+
                     // Add relevant links
                     builder.addLink("self", "/data/" + addressStr);
                     builder.addLink("data", "/data");
                     builder.addLink("program", "/program");
-                    
+
                     sendJsonResponse(exchange, builder.build(), 200);
                 } catch (TransactionException e) {
                     Msg.error(this, "Transaction failed: Update Data", e);
@@ -721,9 +753,9 @@ package eu.starsong.ghidra.endpoints;
                 sendErrorResponse(exchange, 500, "Error updating data: " + e.getMessage(), "INTERNAL_ERROR");
             }
         }
-        
+
         // parseIntOrDefault is inherited from AbstractEndpoint
-        
+
         /**
          * Handle a data creation request
          */
@@ -735,29 +767,29 @@ package eu.starsong.ghidra.endpoints;
                     debugInfo.append(entry.getKey()).append("=").append(entry.getValue()).append(", ");
                 }
                 Msg.info(this, debugInfo.toString());
-                
+
                 final String addressStr = params.get("address");
                 final String dataTypeStr = params.get("type");
                 final String sizeStr = params.get("size");
                 final String nameStr = params.containsKey("name") ? params.get("name") : params.get("newName");
-                
+
                 // Validate required parameters
                 if (addressStr == null || addressStr.isEmpty()) {
                     sendErrorResponse(exchange, 400, "Missing required parameter: address", "MISSING_PARAMETERS");
                     return;
                 }
-                
+
                 if (dataTypeStr == null || dataTypeStr.isEmpty()) {
                     sendErrorResponse(exchange, 400, "Missing required parameter: type", "MISSING_PARAMETERS");
                     return;
                 }
-                
+
                 Program program = getCurrentProgram();
                 if (program == null) {
                     sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                     return;
                 }
-                
+
                 // Parse size if provided
                 Integer size = null;
                 if (sizeStr != null && !sizeStr.isEmpty()) {
@@ -768,7 +800,7 @@ package eu.starsong.ghidra.endpoints;
                         return;
                     }
                 }
-                
+
                 try {
                     // Create a result map for the response
                     Map<String, Object> resultMap = new HashMap<>();
@@ -777,42 +809,43 @@ package eu.starsong.ghidra.endpoints;
                     if (size != null) {
                         resultMap.put("size", size);
                     }
-                    
+
                     final Integer finalSize = size; // Make a final copy for the lambda
-                    
+
                     TransactionHelper.executeInTransaction(program, "Create data at " + addressStr, () -> {
                         // Get the address
                         Address addr = program.getAddressFactory().getAddress(addressStr);
                         Listing listing = program.getListing();
-                        
+
                         // Verify no data is already defined at this address
                         Data existingData = listing.getDefinedDataAt(addr);
                         if (existingData != null) {
                             throw new Exception("Data already exists at address: " + addressStr);
                         }
-                        
+
                         // Find the requested data type
                         ghidra.program.model.data.DataType dataType = GhidraUtil.resolveDataType(program, dataTypeStr);
                         if (dataType == null) {
                             throw new Exception("Could not find or parse data type: " + dataTypeStr);
                         }
 
-                        Msg.info(this, "Successfully mapped data type '" + dataTypeStr + "' to Ghidra type: " + dataType.getName());
-                        
+                        DataType finalDataType = applySizeToDataType(program, dataType, finalSize, dataTypeStr);
+                        Msg.info(this, "Successfully mapped data type '" + dataTypeStr + "' to Ghidra type: " + finalDataType.getName());
+
                         // Create the data at the specified address
                         Data newData;
-                        
+
                         // Make final copy of dataType for use in lambda
-                        final ghidra.program.model.data.DataType finalDataType = dataType;
-                        
+                        final ghidra.program.model.data.DataType finalDataTypeRef = finalDataType;
+
                         // Check if there's already existing code or data at this address
-                        int dataSize = finalSize != null ? finalSize : finalDataType.getLength();
+                        int dataSize = finalSize != null ? finalSize : finalDataTypeRef.getLength();
                         if (dataSize <= 0) dataSize = 4; // Default size if unknown
-                        
+
                         // Check if there's data/code at the target address range
                         boolean hasConflict = false;
                         String conflictType = "";
-                        
+
                         try {
                             // Check for existing code units
                             if (listing.getInstructionAt(addr) != null) {
@@ -836,12 +869,12 @@ package eu.starsong.ghidra.endpoints;
                                     }
                                 }
                             }
-                            
+
                             if (hasConflict) {
-                                throw new Exception("Conflicting " + conflictType + " exists at address range " + addr + 
+                                throw new Exception("Conflicting " + conflictType + " exists at address range " + addr +
                                                    " to " + addr.add(dataSize - 1) + ". Use update_data or delete_data first.");
                             }
-                            
+
                             // Also check if the address is valid (in a memory block)
                             if (!program.getMemory().contains(addr)) {
                                 throw new Exception("Address " + addressStr + " is not in any memory block. Valid addresses must be within defined memory blocks.");
@@ -853,15 +886,15 @@ package eu.starsong.ghidra.endpoints;
                             // Other errors we can try to continue
                             Msg.warn(this, "Error checking for existing code units: " + e.getMessage());
                         }
-                        
+
                         // Now create the data
                         if (finalSize != null) {
                             // For variable length types like strings, need to clear space first
                             if (finalDataType.getLength() <= 0 || finalDataType.getLength() != finalSize) {
                                 Msg.info(this, "Creating variable-length data with size: " + finalSize);
-                                
+
                                 // For arrays and strings, may need to create custom type
-                                if (finalDataType.getName().toLowerCase().contains("string") || 
+                                if (finalDataType.getName().toLowerCase().contains("string") ||
                                     dataTypeStr.toLowerCase().contains("string")) {
                                     // Create a string data type with specified length
                                     try {
@@ -884,37 +917,37 @@ package eu.starsong.ghidra.endpoints;
                             // Normal data creation without size
                             newData = listing.createData(addr, finalDataType);
                         }
-                        
+
                         if (newData == null) {
                             throw new Exception("Failed to create data of type " + dataTypeStr + " at " + addressStr);
                         }
-                        
+
                         // Set name if provided
                         if (nameStr != null && !nameStr.isEmpty()) {
                             SymbolTable symTable = program.getSymbolTable();
                             symTable.createLabel(addr, nameStr, SourceType.USER_DEFINED);
                             resultMap.put("name", nameStr);
                         }
-                        
+
                         // Add information about the created data to the result
                         resultMap.put("length", newData.getLength());
                         resultMap.put("value", newData.getDefaultValueRepresentation());
-                        
+
                         return null;
                     });
-                    
+
                     resultMap.put("message", "Data created successfully");
-                    
+
                     // Build HATEOAS response
                     eu.starsong.ghidra.api.ResponseBuilder builder = new eu.starsong.ghidra.api.ResponseBuilder(exchange, port)
                         .success(true)
                         .result(resultMap);
-                    
+
                     // Add relevant links
                     builder.addLink("self", "/data/" + addressStr);
                     builder.addLink("data", "/data");
                     builder.addLink("program", "/program");
-                    
+
                     sendJsonResponse(exchange, builder.build(), 200);
                 } catch (TransactionException e) {
                     Msg.error(this, "Transaction failed: Create Data", e);
@@ -928,55 +961,55 @@ package eu.starsong.ghidra.endpoints;
                 sendErrorResponse(exchange, 500, "Error creating data: " + e.getMessage(), "INTERNAL_ERROR");
             }
         }
-        
+
         public void handleSetDataType(HttpExchange exchange) throws IOException {
             try {
                 if ("PATCH".equals(exchange.getRequestMethod()) || "POST".equals(exchange.getRequestMethod())) {
                     Map<String, String> params = parseJsonPostParams(exchange);
-                    
+
                     // Debug - log all parameters received by this method
                     StringBuilder debugInfo = new StringBuilder("DEBUG handleSetDataType - Received parameters: ");
                     for (Map.Entry<String, String> entry : params.entrySet()) {
                         debugInfo.append(entry.getKey()).append("=").append(entry.getValue()).append(", ");
                     }
                     Msg.info(this, debugInfo.toString());
-                    
+
                     final String addressStr = params.get("address");
                     final String dataTypeStr = params.get("type");
-                    
+
                     if (addressStr == null || addressStr.isEmpty() || dataTypeStr == null || dataTypeStr.isEmpty()) {
-                        sendErrorResponse(exchange, 400, 
-                            "Missing required parameters: address and type must be provided", 
+                        sendErrorResponse(exchange, 400,
+                            "Missing required parameters: address and type must be provided",
                             "MISSING_PARAMETERS");
                         return;
                     }
-                    
+
                     Program program = getCurrentProgram();
                     if (program == null) {
                         sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                         return;
                     }
-                    
+
                     try {
                         Map<String, Object> result = new HashMap<>();
                         result.put("address", addressStr);
                         result.put("type", dataTypeStr);
-                        
+
                         TransactionHelper.executeInTransaction(program, "Set data type at " + addressStr, () -> {
                             // Get the data at the address
                             Address addr = program.getAddressFactory().getAddress(addressStr);
                             Listing listing = program.getListing();
                             Data existingData = listing.getDefinedDataAt(addr);
-                            
+
                             if (existingData == null) {
                                 throw new Exception("No defined data found at address: " + addressStr);
                             }
-                            
+
                             ghidra.program.model.data.DataType dataType = GhidraUtil.resolveDataType(program, dataTypeStr);
                             if (dataType == null) {
                                 throw new Exception("Could not find or parse data type: " + dataTypeStr);
                             }
-                            
+
                             // Apply the data type
                             try {
                                 Data newDataItem = listing.createData(addr, dataType);
@@ -984,7 +1017,7 @@ package eu.starsong.ghidra.endpoints;
                                     // Try clearing existing data first and then creating it
                                     listing.clearCodeUnits(addr, addr.add(existingData.getLength() - 1), false);
                                     newDataItem = listing.createData(addr, dataType);
-                                    
+
                                     if (newDataItem == null) {
                                         throw new Exception("Failed to apply data type " + dataTypeStr + " at " + addressStr);
                                     }
@@ -992,7 +1025,7 @@ package eu.starsong.ghidra.endpoints;
                             } catch (Exception e) {
                                 throw new Exception("Failed to apply data type " + dataTypeStr + " at " + addressStr, e);
                             }
-                            
+
                             // Re-get the data to return its current info
                             Data newData = listing.getDefinedDataAt(addr);
                             if (newData != null) {
@@ -1000,20 +1033,20 @@ package eu.starsong.ghidra.endpoints;
                                 result.put("length", newData.getLength());
                                 result.put("value", newData.getDefaultValueRepresentation());
                             }
-                            
+
                             return null;
                         });
-                        
+
                         // Build HATEOAS response
                         eu.starsong.ghidra.api.ResponseBuilder builder = new eu.starsong.ghidra.api.ResponseBuilder(exchange, port)
                             .success(true)
                             .result(result);
-                        
+
                         // Add relevant links
                         builder.addLink("self", "/data/" + addressStr);
                         builder.addLink("data", "/data");
                         builder.addLink("program", "/program");
-                        
+
                         sendJsonResponse(exchange, builder.build(), 200);
                     } catch (TransactionException e) {
                         Msg.error(this, "Transaction failed: Set Data Type", e);
@@ -1033,7 +1066,7 @@ package eu.starsong.ghidra.endpoints;
                 sendErrorResponse(exchange, 500, "Error setting data type: " + e.getMessage(), "INTERNAL_ERROR");
             }
         }
-        
+
         /**
          * Handle a delete data request
          */
@@ -1045,31 +1078,31 @@ package eu.starsong.ghidra.endpoints;
                     debugInfo.append(entry.getKey()).append("=").append(entry.getValue()).append(", ");
                 }
                 Msg.info(this, debugInfo.toString());
-                
+
                 final String addressStr = params.get("address");
-                
+
                 // Validate required parameters
                 if (addressStr == null || addressStr.isEmpty()) {
                     sendErrorResponse(exchange, 400, "Missing required parameter: address", "MISSING_PARAMETERS");
                     return;
                 }
-                
+
                 Program program = getCurrentProgram();
                 if (program == null) {
                     sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                     return;
                 }
-                
+
                 try {
                     // Create a result map for the response
                     Map<String, Object> resultMap = new HashMap<>();
                     resultMap.put("address", addressStr);
-                    
+
                     TransactionHelper.executeInTransaction(program, "Delete data at " + addressStr, () -> {
                         // Get the address
                         Address addr = program.getAddressFactory().getAddress(addressStr);
                         Listing listing = program.getListing();
-                        
+
                         // Check if there's data at the address
                         Data existingData = listing.getDefinedDataAt(addr);
                         if (existingData == null) {
@@ -1087,32 +1120,32 @@ package eu.starsong.ghidra.endpoints;
                             // Remember what we're deleting
                             resultMap.put("original_type", existingData.getDataType().getName());
                             resultMap.put("length", existingData.getLength());
-                            
+
                             // Get the name if any
                             Symbol symbol = program.getSymbolTable().getPrimarySymbol(addr);
                             if (symbol != null) {
                                 resultMap.put("original_name", symbol.getName());
                             }
-                            
+
                             // Clear the data
                             listing.clearCodeUnits(addr, addr.add(existingData.getLength() - 1), true);
                             resultMap.put("cleared", "data");
                         }
-                        
+
                         return null;
                     });
-                    
+
                     resultMap.put("message", "Data deleted successfully");
-                    
+
                     // Build HATEOAS response
                     eu.starsong.ghidra.api.ResponseBuilder builder = new eu.starsong.ghidra.api.ResponseBuilder(exchange, port)
                         .success(true)
                         .result(resultMap);
-                    
+
                     // Add relevant links
                     builder.addLink("data", "/data");
                     builder.addLink("program", "/program");
-                    
+
                     sendJsonResponse(exchange, builder.build(), 200);
                 } catch (TransactionException e) {
                     Msg.error(this, "Transaction failed: Delete Data", e);
@@ -1128,7 +1161,7 @@ package eu.starsong.ghidra.endpoints;
         }
 
         // Note: The handleUpdateData method is already defined earlier in this file at line 477
-        
+
         /**
          * Handle request to list strings in the binary
          * @param exchange The HTTP exchange
@@ -1140,13 +1173,13 @@ package eu.starsong.ghidra.endpoints;
                 int offset = parseIntOrDefault(qparams.get("offset"), 0);
                 int limit = parseIntOrDefault(qparams.get("limit"), 2000);
                 String filter = qparams.get("filter");
-                
+
                 Program program = getCurrentProgram();
                 if (program == null) {
                     sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
                     return;
                 }
-                
+
                 List<Map<String, Object>> strings = new ArrayList<>();
 
                 for (MemoryBlock block : program.getMemory().getBlocks()) {
@@ -1200,21 +1233,21 @@ package eu.starsong.ghidra.endpoints;
                         }
                     }
                 }
-                
+
                 // Build response with HATEOAS links
                 eu.starsong.ghidra.api.ResponseBuilder builder = new eu.starsong.ghidra.api.ResponseBuilder(exchange, port)
                     .success(true);
-                
+
                 // Apply pagination and get paginated items
                 List<Map<String, Object>> paginated = applyPagination(strings, offset, limit, builder, "/strings");
-                
+
                 // Set the paginated result
                 builder.result(paginated);
-                
+
                 // Add program link
                 builder.addLink("program", "/program");
                 builder.addLink("data", "/data");
-                
+
                 sendJsonResponse(exchange, builder.build(), 200);
             } catch (Exception e) {
                 Msg.error(this, "Error listing strings", e);
