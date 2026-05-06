@@ -428,13 +428,13 @@ Cline (VS Code extension) uses a separate configuration file. To set up GhydraMC
 }
 ```
 
-If you prefer to use `python` directly instead of `uv`:
+If you prefer to use `python3` directly instead of `uv`:
 
 ```json
 {
   "mcpServers": {
     "ghydra": {
-      "command": "python",
+      "command": "python3",
       "args": [
         "/ABSOLUTE_PATH_TO/bridge_mcp_hydra.py"
       ],
