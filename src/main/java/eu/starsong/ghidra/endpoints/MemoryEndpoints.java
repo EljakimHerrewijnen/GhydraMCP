@@ -61,7 +61,7 @@ public class MemoryEndpoints extends AbstractEndpoint {
                 handleMemoryAddressRequest(exchange);
             } else if (path.equals("/memory/background-colors")) {
                 handleBackgroundColorsRequest(exchange);
-            } else if (path.equals("/memory/blocks")) {
+            } else if (path.equals("/memory/blocks") || path.equals("/memory/blocks/") || path.startsWith("/memory/blocks/")) {
                 handleMemoryBlocksRequest(exchange);
             } else {
                 // Handle as general memory address request

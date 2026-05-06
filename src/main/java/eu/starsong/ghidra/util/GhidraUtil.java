@@ -104,21 +104,40 @@ public class GhidraUtil {
         }
 
         DataTypeManager dtm = program.getDataTypeManager();
+        String normalizedName = dataTypeName.trim();
 
-        // Try direct path lookup
-        DataType dataType = dtm.getDataType("/" + dataTypeName);
-
-        // Try search by name
-        if (dataType == null) {
-            dataType = dtm.findDataType("/" + dataTypeName);
+        // Try direct path lookup for absolute category names
+        DataType dataType = null;
+        if (normalizedName.startsWith("/")) {
+            dataType = dtm.getDataType(normalizedName);
+        } else {
+            dataType = dtm.getDataType("/" + normalizedName);
         }
 
-        // Try function signature parser
+        // Try search by name if exact path lookup failed
         if (dataType == null) {
             try {
+                List<DataType> foundTypes = new ArrayList<>();
+                dtm.findDataTypes(normalizedName, foundTypes);
+                if (!foundTypes.isEmpty()) {
+                    dataType = foundTypes.get(0);
+                }
+            } catch (Exception ignored) {
+                // ignore search failures
+            }
+        }
+
+        if (dataType == null) {
+            dataType = findDataType(program, normalizedName);
+        }
+
+        // Try function signature parser for typedefs and function-pointer prototypes
+        if (dataType == null) {
+            try {
+                String parserInput = normalizeFunctionPointerPrototype(normalizedName);
                 ghidra.app.util.parser.FunctionSignatureParser parser =
                     new ghidra.app.util.parser.FunctionSignatureParser(dtm, null);
-                dataType = parser.parse(null, dataTypeName);
+                dataType = parser.parse(null, parserInput);
             } catch (Exception e) {
                 Msg.debug(GhidraUtil.class, "Function signature parser failed for '" + dataTypeName + "': " + e.getMessage());
             }
@@ -126,7 +145,7 @@ public class GhidraUtil {
 
         // Try built-in primitive types as a last resort
         if (dataType == null) {
-            switch (dataTypeName.toLowerCase()) {
+            switch (normalizedName.toLowerCase()) {
                 case "byte":
                     dataType = new ghidra.program.model.data.ByteDataType();
                     break;
@@ -149,10 +168,29 @@ public class GhidraUtil {
                     dataType = new ghidra.program.model.data.DoubleDataType();
                     break;
                 case "int":
+                case "int32_t":
                     dataType = new ghidra.program.model.data.IntegerDataType();
+                    break;
+                case "uint8_t":
+                    dataType = new ghidra.program.model.data.ByteDataType();
+                    break;
+                case "uint16_t":
+                    dataType = new ghidra.program.model.data.WordDataType();
                     break;
                 case "uint32_t":
                     dataType = new ghidra.program.model.data.UnsignedIntegerDataType();
+                    break;
+                case "uint64_t":
+                    dataType = new ghidra.program.model.data.QWordDataType();
+                    break;
+                case "int8_t":
+                    dataType = new ghidra.program.model.data.ByteDataType();
+                    break;
+                case "int16_t":
+                    dataType = new ghidra.program.model.data.WordDataType();
+                    break;
+                case "int64_t":
+                    dataType = new ghidra.program.model.data.QWordDataType();
                     break;
                 case "long":
                     dataType = new ghidra.program.model.data.LongDataType();
@@ -167,6 +205,30 @@ public class GhidraUtil {
         }
 
         return dataType;
+    }
+
+    private static String normalizeFunctionPointerPrototype(String dataTypeName) {
+        if (dataTypeName == null || dataTypeName.isEmpty()) {
+            return dataTypeName;
+        }
+
+        String normalized = dataTypeName.trim();
+
+        // Support typedef style declarations
+        if (normalized.toLowerCase().startsWith("typedef ")) {
+            normalized = normalized.substring("typedef ".length()).trim();
+        }
+
+        // Strip trailing semicolons
+        if (normalized.endsWith(";")) {
+            normalized = normalized.substring(0, normalized.length() - 1).trim();
+        }
+
+        // Normalize function-pointer declarations such as 'int (*callback)(int)'
+        normalized = normalized.replaceAll("\\(\\*\\s*[^)]+\\)", "(*__callback__)");
+        normalized = normalized.replaceAll("\\(\\*\\)\\s*", "(*__callback__)");
+
+        return normalized;
     }
 
     /**

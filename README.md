@@ -215,9 +215,10 @@ GhydraMCP v2.2.0 organizes tools into logical namespaces for better discoverabil
 - `data_list`: List data items (params: offset, limit, addr, name, name_contains, port [optional])
 - `data_list_strings`: List all defined strings (params: offset, limit, filter, port [optional])
 - `data_create`: Create data at address (params: address, data_type, size [optional], port [optional])
+- `data_create_region`: Create a typed data region (params: address, data_type, size, name [optional], port [optional])
 - `data_rename`: Rename data item (params: address, name, port [optional])
 - `data_delete`: Delete data item (params: address, port [optional])
-- `data_set_type`: Change data type (params: address, data_type, port [optional])
+- `data_set_type`: Change data type (params: address, data_type, size [optional], port [optional])
 
 **Struct Management** (`structs_*`):
 - `structs_list`: List struct and enum data types (params: offset, limit, category [optional], port [optional])
@@ -266,12 +267,37 @@ client.use_tool("ghydra", "functions_rename", {"address": "0x00401000", "new_nam
 client.use_tool("ghydra", "functions_set_signature", {"address": "0x00401000", "signature": "int process_data(char* buf, int len)"})
 client.use_tool("ghydra", "functions_set_comment", {"address": "0x00401000", "comment": "Main processing function"})
 
+# Retyping a function — set return type and all parameter types in one call
+# Use functions_set_signature with a full C prototype string.
+# Ghidra parses the signature and applies the return type, parameter names, and parameter types.
+#
+# Example: recovered function with unknown types -> apply known struct types
+client.use_tool("ghydra", "functions_set_signature", {
+    "address": "0x00401234",
+    "signature": "some_struct * clear_some_struct(some_struct input, bool check_empty)"
+})
+# Example: pointer return type with multiple typed parameters
+client.use_tool("ghydra", "functions_set_signature", {
+    "name": "parse_packet",
+    "signature": "NetworkPacket * parse_packet(uint8_t * buf, uint32_t len, ParseContext * ctx)"
+})
+
+# To update a single parameter or local variable type without changing the whole signature:
+client.use_tool("ghydra", "functions_update_variable", {
+    "address": "0x00401234",
+    "variable_name": "param_0",
+    "new_name": "input",
+    "data_type": "some_struct"
+})
+# To update only the return type, use functions_set_signature with the full prototype.
+
 # Data Manipulation
 client.use_tool("ghydra", "data_list_strings", {"filter": "password"})  # Find strings containing "password"
 client.use_tool("ghydra", "data_list", {"offset": 0, "limit": 50})
 client.use_tool("ghydra", "data_create", {"address": "0x00401234", "data_type": "int"})
+client.use_tool("ghydra", "data_create_region", {"address": "0x00402000", "data_type": "char", "size": 64, "name": "packet_buffer"})
 client.use_tool("ghydra", "data_rename", {"address": "0x00401234", "name": "counter"})
-client.use_tool("ghydra", "data_set_type", {"address": "0x00401238", "data_type": "char *"})
+client.use_tool("ghydra", "data_set_type", {"address": "0x00401238", "data_type": "char *", "size": 16})
 client.use_tool("ghydra", "data_delete", {"address": "0x0040123C"})
 
 # Struct Management
