@@ -200,6 +200,39 @@ Returns information about all active GhydraMCP plugin instances.
 }
 ```
 
+### `GET /capabilities`
+Returns the server's currently supported sync and automation features. This is intended for clients that need to adapt to different plugin versions without probing individual endpoints.
+```json
+{
+  "id": "req-capabilities",
+  "instance": "http://localhost:8192",
+  "success": true,
+  "result": {
+    "serverVersion": "v2.2.0",
+    "programLoaded": true,
+    "features": {
+      "ensure_memory_block": true,
+      "ensure_data": true,
+      "project_file_schema_v2": true,
+      "variable_ids": true,
+      "variable_mutation_by_id": true,
+      "address_targeted_function_writes": true,
+      "run_batch": true
+    },
+    "supportedBatchOperations": [
+      "ensure_memory_block",
+      "ensure_data",
+      "update_variable",
+      "apply_struct"
+    ]
+  },
+  "_links": {
+    "self": { "href": "/capabilities" },
+    "run_batch": { "href": "/transactions/run-batch", "method": "POST" }
+  }
+}
+```
+
 ## Resource Types
 
 Each Ghidra plugin instance runs in the context of a single program, so all resources are relative to the current program. The program's details are available through the `GET /info` and `GET /program` endpoints.
@@ -1508,6 +1541,81 @@ Provides access to Ghidra's analysis results.
       },
       // ... more steps
     ]
+  }
+  ```
+
+### 11. Automation & Batch Sync
+
+Provides automation-oriented endpoints for capability discovery and grouped transactional mutations.
+
+- **`POST /transactions/run-batch`**: Execute multiple supported operations inside one outer program transaction.
+  - Request Body:
+    - `ops`: Array of operation objects. Each operation must include an `op` key.
+    - `rollback_on_error`: When `true` (default), any failing operation aborts the batch and rolls back all prior changes.
+  - Supported `op` values:
+    - `ensure_memory_block`
+    - `ensure_data`
+    - `update_variable` or `functions_update_variable`
+    - `apply_struct` or `functions_apply_struct`
+  ```json
+  {
+    "ops": [
+      {
+        "op": "ensure_memory_block",
+        "name": "ram",
+        "address": "0x80000000",
+        "size": 4096,
+        "readable": true,
+        "writable": true
+      },
+      {
+        "op": "ensure_data",
+        "address": "0x80000000",
+        "type": "byte[16]",
+        "label": "g_header"
+      },
+      {
+        "op": "apply_struct",
+        "function_address": "0x401000",
+        "variable_id": "param:0:1234",
+        "struct_name": "/types/header_t",
+        "as_pointer": true
+      }
+    ],
+    "rollback_on_error": true
+  }
+  ```
+  ```json
+  {
+    "success": true,
+    "result": {
+      "operations": [
+        {
+          "index": 0,
+          "op": "ensure_memory_block",
+          "success": true,
+          "result": {
+            "name": "ram",
+            "start": "0x80000000",
+            "size": 4096,
+            "action": "created"
+          }
+        },
+        {
+          "index": 1,
+          "op": "ensure_data",
+          "success": true,
+          "result": {
+            "address": "0x80000000",
+            "action": "updated"
+          }
+        }
+      ],
+      "rollbackOnError": true,
+      "rolledBack": false,
+      "appliedCount": 2,
+      "failedCount": 0
+    }
   }
   ```
 

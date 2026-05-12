@@ -215,6 +215,7 @@ GhydraMCP v2.2.0 organizes tools into logical namespaces for better discoverabil
 - `data_list`: List data items (params: offset, limit, addr, name, name_contains, port [optional])
 - `data_list_strings`: List all defined strings (params: offset, limit, filter, port [optional])
 - `data_create`: Create data at address (params: address, data_type, size [optional], port [optional])
+- `ensure_data`: Create or update typed data and an optional label atomically (params: address, data_type, label [optional], clear_conflicts, size [optional], port [optional])
 - `data_create_region`: Create a typed data region (params: address, data_type, size, name [optional], port [optional])
 - `data_rename`: Rename data item (params: address, name, port [optional])
 - `data_delete`: Delete data item (params: address, port [optional])
@@ -232,6 +233,11 @@ GhydraMCP v2.2.0 organizes tools into logical namespaces for better discoverabil
 - `memory_read`: Read bytes from memory (params: address, length, format, port [optional])
 - `memory_write`: Write bytes to memory (params: address, bytes_data, format, port [optional])
 - `memory_map_add`: Create a named memory mapping/block (params: name, address, size, readable, writable, executable, initialized, port [optional])
+- `ensure_memory_block`: Create or update a named memory block idempotently (params: name, address, size, readable, writable, executable, initialized, port [optional])
+
+**Automation & Sync**:
+- `get_capabilities`: Discover supported sync features and batch operations (params: port [optional])
+- `run_batch`: Execute multiple sync operations inside one Ghidra transaction with rollback on failure (params: operations, rollback_on_error, port [optional])
 
 **Memory Segments** (`segments_*`):
 - `segments_list`: List memory segments with range and permissions (params: offset, limit, name [optional], port [optional])

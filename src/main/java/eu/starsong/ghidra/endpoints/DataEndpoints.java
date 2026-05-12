@@ -78,6 +78,14 @@ package eu.starsong.ghidra.endpoints;
                     sendErrorResponse(exchange, 405, "Method Not Allowed");
                 }
             }, port));
+            server.createContext("/data/ensure", HttpUtil.safeHandler(exchange -> {
+                if ("POST".equals(exchange.getRequestMethod())) {
+                    Map<String, String> params = parseJsonPostParams(exchange);
+                    handleEnsureData(exchange, params);
+                } else {
+                    sendErrorResponse(exchange, 405, "Method Not Allowed");
+                }
+            }, port));
             server.createContext("/strings", HttpUtil.safeHandler(exchange -> {
                 if ("GET".equals(exchange.getRequestMethod())) {
                     handleListStrings(exchange);
@@ -85,6 +93,77 @@ package eu.starsong.ghidra.endpoints;
                     sendErrorResponse(exchange, 405, "Method Not Allowed");
                 }
             }, port));
+        }
+
+        private void handleEnsureData(HttpExchange exchange, Map<String, String> params) throws IOException {
+            try {
+                final String addressStr = params.get("address");
+                final String dataTypeStr = params.get("type");
+                final String label = params.containsKey("label") ? params.get("label") : params.get("name");
+                final String clearConflictsStr = params.getOrDefault("clear_conflicts", "true");
+                final boolean clearConflicts = Boolean.parseBoolean(clearConflictsStr);
+                final String sizeStr = params.get("size");
+
+                if (addressStr == null || addressStr.isEmpty()) {
+                    sendErrorResponse(exchange, 400, "Missing required parameter: address", "MISSING_PARAMETERS");
+                    return;
+                }
+
+                if (dataTypeStr == null || dataTypeStr.isEmpty()) {
+                    sendErrorResponse(exchange, 400, "Missing required parameter: type", "MISSING_PARAMETERS");
+                    return;
+                }
+
+                Integer parsedSize = null;
+                if (sizeStr != null && !sizeStr.isEmpty()) {
+                    try {
+                        parsedSize = Integer.parseInt(sizeStr);
+                        if (parsedSize <= 0) {
+                            sendErrorResponse(exchange, 400, "Size must be a positive integer", "INVALID_PARAMETER");
+                            return;
+                        }
+                    } catch (NumberFormatException ex) {
+                        sendErrorResponse(exchange, 400, "Invalid size parameter: must be an integer", "INVALID_PARAMETER");
+                        return;
+                    }
+                }
+                final Integer size = parsedSize;
+
+                Program program = getCurrentProgram();
+                if (program == null) {
+                    sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+                    return;
+                }
+
+                try {
+                    Map<String, Object> resultMap = TransactionHelper.executeInTransaction(program,
+                        "Ensure data at " + addressStr,
+                        () -> ensureData(program, addressStr, dataTypeStr, size, label, clearConflicts)
+                    );
+
+                    eu.starsong.ghidra.api.ResponseBuilder builder = new eu.starsong.ghidra.api.ResponseBuilder(exchange, port)
+                        .success(true)
+                        .result(resultMap);
+
+                    builder.addLink("self", "/data/ensure");
+                    builder.addLink("data", "/data/" + addressStr);
+                    builder.addLink("program", "/program");
+
+                    sendJsonResponse(exchange, builder.build(), "created".equals(resultMap.get("action")) ? 201 : 200);
+                } catch (TransactionException e) {
+                    Msg.error(this, "Transaction failed: Ensure Data", e);
+                    sendErrorResponse(exchange, 500, "Failed to ensure data: " + e.getMessage(), "TRANSACTION_ERROR");
+                } catch (Exception e) {
+                    Msg.error(this, "Error ensuring data", e);
+                    sendErrorResponse(exchange, 400, "Error ensuring data: " + e.getMessage(), "INVALID_PARAMETER");
+                }
+            } catch (IOException e) {
+                Msg.error(this, "Error parsing POST params for ensure data", e);
+                sendErrorResponse(exchange, 400, "Invalid request body: " + e.getMessage(), "INVALID_REQUEST");
+            } catch (Exception e) {
+                Msg.error(this, "Unexpected error ensuring data", e);
+                sendErrorResponse(exchange, 500, "Error ensuring data: " + e.getMessage(), "INTERNAL_ERROR");
+            }
         }
 
         public void handleData(HttpExchange exchange) throws IOException {
@@ -599,6 +678,131 @@ package eu.starsong.ghidra.endpoints;
         }
 
         throw new Exception("Specified size " + size + " is not a multiple of the base type length " + baseLength + " for type " + originalTypeName);
+    }
+
+    Map<String, Object> ensureData(Program program,
+                                   String addressStr,
+                                   String dataTypeStr,
+                                   Integer size,
+                                   String label,
+                                   boolean clearConflicts) throws Exception {
+        Address addr = program.getAddressFactory().getAddress(addressStr);
+        if (addr == null) {
+            throw new Exception("Invalid address format: " + addressStr);
+        }
+
+        if (!program.getMemory().contains(addr)) {
+            throw new Exception("Address " + addressStr + " is not in any memory block");
+        }
+
+        Listing listing = program.getListing();
+        SymbolTable symbolTable = program.getSymbolTable();
+        Data existingData = listing.getDefinedDataAt(addr);
+        Symbol existingSymbol = symbolTable.getPrimarySymbol(addr);
+        String existingLabel = existingSymbol != null ? existingSymbol.getName() : null;
+
+        DataType resolvedDataType = GhidraUtil.resolveDataType(program, dataTypeStr);
+        if (resolvedDataType == null) {
+            throw new Exception("Could not find or parse data type: " + dataTypeStr);
+        }
+
+        DataType finalDataType = applySizeToDataType(program, resolvedDataType, size, dataTypeStr);
+        int requestedLength = size != null ? size : finalDataType.getLength();
+        if (requestedLength <= 0) {
+            requestedLength = existingData != null ? existingData.getLength() : 1;
+        }
+
+        String targetLabel = (label != null && !label.isBlank()) ? label : existingLabel;
+        boolean typeMatches = existingData != null &&
+            existingData.getDataType().getName().equals(finalDataType.getName()) &&
+            (size == null || existingData.getLength() == requestedLength);
+        boolean labelMatches = Objects.equals(existingLabel, targetLabel);
+
+        if (typeMatches && labelMatches) {
+            Map<String, Object> unchanged = buildEnsureDataResult(addr, dataTypeStr, finalDataType, targetLabel, existingData, false, "unchanged");
+            unchanged.put("message", "Data already matched the requested type and label");
+            return unchanged;
+        }
+
+        boolean hasInstructionConflict = listing.getInstructionAt(addr) != null;
+        int clearLength = existingData != null ? Math.max(existingData.getLength(), requestedLength) : requestedLength;
+        if (!clearConflicts && (hasInstructionConflict || existingData != null)) {
+            throw new Exception("Conflicting data or instruction exists at address: " + addressStr);
+        }
+
+        if (clearConflicts) {
+            listing.clearCodeUnits(addr, addr.add(clearLength - 1), true);
+        }
+
+        Data newData = createEnsuredData(listing, addr, finalDataType, dataTypeStr, size);
+        if (newData == null) {
+            throw new Exception("Failed to create data of type " + dataTypeStr + " at " + addressStr);
+        }
+
+        if (targetLabel != null && !targetLabel.isBlank()) {
+            Symbol currentSymbol = symbolTable.getPrimarySymbol(addr);
+            if (currentSymbol != null) {
+                currentSymbol.setName(targetLabel, SourceType.USER_DEFINED);
+            } else {
+                symbolTable.createLabel(addr, targetLabel, SourceType.USER_DEFINED);
+            }
+        }
+
+        Map<String, Object> result = buildEnsureDataResult(
+            addr,
+            dataTypeStr,
+            finalDataType,
+            targetLabel,
+            newData,
+            clearConflicts && (existingData != null || hasInstructionConflict),
+            existingData == null && !hasInstructionConflict ? "created" : "updated"
+        );
+        result.put("message", "Data ensured successfully");
+        if (existingData != null) {
+            result.put("previousDataType", existingData.getDataType().getName());
+        }
+        if (existingLabel != null) {
+            result.put("previousLabel", existingLabel);
+        }
+        return result;
+    }
+
+    private Data createEnsuredData(Listing listing,
+                                   Address addr,
+                                   DataType finalDataType,
+                                   String originalTypeName,
+                                   Integer size) throws Exception {
+        if (size != null && (finalDataType instanceof StringDataType || originalTypeName.toLowerCase().contains("string"))) {
+            return listing.createData(addr, new StringDataType(), size.intValue());
+        }
+        return listing.createData(addr, finalDataType);
+    }
+
+    private Map<String, Object> buildEnsureDataResult(Address addr,
+                                                      String requestedType,
+                                                      DataType finalDataType,
+                                                      String label,
+                                                      Data data,
+                                                      boolean clearedConflicts,
+                                                      String action) {
+        Map<String, Object> result = new HashMap<>();
+        result.put("address", addr.toString());
+        result.put("requestedType", requestedType);
+        result.put("dataType", finalDataType.getName());
+        result.put("action", action);
+        result.put("created", "created".equals(action));
+        result.put("updated", "updated".equals(action));
+        result.put("unchanged", "unchanged".equals(action));
+        result.put("clearedConflicts", clearedConflicts);
+        if (label != null && !label.isBlank()) {
+            result.put("label", label);
+            result.put("name", label);
+        }
+        if (data != null) {
+            result.put("length", data.getLength());
+            result.put("value", data.getDefaultValueRepresentation());
+        }
+        return result;
     }
 
         public void handleUpdateData(HttpExchange exchange, Map<String, String> params) throws IOException {

@@ -151,17 +151,15 @@ public class ProjectManagementEndpoints extends AbstractEndpoint {
             } else {
                 // Just list current folder contents
                 for (DomainFolder subFolder : folder.getFolders()) {
-                    Map<String, Object> folderInfo = new HashMap<>();
-                    folderInfo.put("name", subFolder.getName());
-                    folderInfo.put("path", subFolder.getPathname());
-                    folderInfo.put("type", "folder");
-                    items.add(folderInfo);
+                    items.add(createFolderInfo(subFolder));
                 }
 
                 for (DomainFile file : folder.getFiles()) {
                     items.add(createFileInfo(file, project));
                 }
             }
+
+            items.sort(Comparator.comparing(item -> String.valueOf(item.getOrDefault("path", item.getOrDefault("name", "")))));
 
             ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true);
@@ -898,6 +896,23 @@ public class ProjectManagementEndpoints extends AbstractEndpoint {
     }
 
     /**
+     * Create folder information map with the same keys as file entries.
+     */
+    private Map<String, Object> createFolderInfo(DomainFolder folder) {
+        Map<String, Object> folderInfo = new HashMap<>();
+        folderInfo.put("name", folder.getName());
+        folderInfo.put("path", folder.getPathname());
+        folderInfo.put("type", "folder");
+        folderInfo.put("contentType", "");
+        folderInfo.put("isProgram", false);
+        folderInfo.put("isOpen", false);
+        folderInfo.put("fileID", null);
+        folderInfo.put("version", null);
+        folderInfo.put("modificationTime", null);
+        return folderInfo;
+    }
+
+    /**
      * Create file information map
      */
     private Map<String, Object> createFileInfo(DomainFile file, Project project) {
@@ -907,7 +922,7 @@ public class ProjectManagementEndpoints extends AbstractEndpoint {
         fileInfo.put("type", "file");
 
         String contentType = file.getContentType();
-        fileInfo.put("contentType", contentType);
+        fileInfo.put("contentType", contentType != null ? contentType : "");
 
         // Check if this is a Program file (contentType could be "Program" or "ghidra.program.model.listing.Program")
         boolean isProgram = contentType != null &&
@@ -916,6 +931,7 @@ public class ProjectManagementEndpoints extends AbstractEndpoint {
                             contentType.endsWith(".Program"));
 
         fileInfo.put("isProgram", isProgram);
+        fileInfo.put("isOpen", false);
 
         if (isProgram) {
             // Check if program is open
@@ -930,9 +946,9 @@ public class ProjectManagementEndpoints extends AbstractEndpoint {
             }
         }
 
-        fileInfo.put("fileID", file.getFileID());
-        fileInfo.put("version", file.getVersion());
-        fileInfo.put("modificationTime", file.getLastModifiedTime());
+        fileInfo.put("fileID", String.valueOf(file.getFileID()));
+        fileInfo.put("version", Integer.valueOf(file.getVersion()));
+        fileInfo.put("modificationTime", Long.valueOf(file.getLastModifiedTime()));
 
         return fileInfo;
     }

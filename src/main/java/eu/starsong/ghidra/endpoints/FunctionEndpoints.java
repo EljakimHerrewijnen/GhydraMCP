@@ -848,6 +848,33 @@ public class FunctionEndpoints extends AbstractEndpoint {
             handleFunctionCallees(exchange, function);
         } else if (resource.equals("hash")) {
             handleFunctionHash(exchange, function);
+        } else if (resource.startsWith("variables/by-id/")) {
+            String variablePath = resource.substring("variables/by-id/".length());
+            String variableId = variablePath;
+            String variableResource = null;
+
+            if (variablePath.contains("/")) {
+                int slashIdx = variablePath.indexOf('/');
+                variableId = variablePath.substring(0, slashIdx);
+                variableResource = variablePath.substring(slashIdx + 1);
+            }
+
+            String method = exchange.getRequestMethod();
+            if (variableResource == null || variableResource.isEmpty()) {
+                if ("PATCH".equals(method)) {
+                    handleUpdateVariable(exchange, function, null, variableId);
+                } else {
+                    sendErrorResponse(exchange, 405, "Method not allowed for variable operations", "METHOD_NOT_ALLOWED");
+                }
+            } else if ("struct".equals(variableResource)) {
+                if ("PATCH".equals(method) || "POST".equals(method)) {
+                    handleApplyStructToVariable(exchange, function, null, variableId);
+                } else {
+                    sendErrorResponse(exchange, 405, "Method not allowed for struct application", "METHOD_NOT_ALLOWED");
+                }
+            } else {
+                sendErrorResponse(exchange, 404, "Variable resource not found: " + variableResource, "RESOURCE_NOT_FOUND");
+            }
         } else if (resource.startsWith("variables/")) {
             // Handle variable operations with optional nested variable sub-resources.
             String variablePath = resource.substring("variables/".length());
@@ -863,13 +890,13 @@ public class FunctionEndpoints extends AbstractEndpoint {
             String method = exchange.getRequestMethod();
             if (variableResource == null || variableResource.isEmpty()) {
                 if ("PATCH".equals(method)) {
-                    handleUpdateVariable(exchange, function, variableName);
+                    handleUpdateVariable(exchange, function, variableName, null);
                 } else {
                     sendErrorResponse(exchange, 405, "Method not allowed for variable operations", "METHOD_NOT_ALLOWED");
                 }
             } else if ("struct".equals(variableResource)) {
                 if ("PATCH".equals(method) || "POST".equals(method)) {
-                    handleApplyStructToVariable(exchange, function, variableName);
+                    handleApplyStructToVariable(exchange, function, variableName, null);
                 } else {
                     sendErrorResponse(exchange, 405, "Method not allowed for struct application", "METHOD_NOT_ALLOWED");
                 }
@@ -1367,7 +1394,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
             String path = exchange.getRequestURI().getPath();
             if (path.contains("/variables/")) {
                 String variableName = path.substring(path.lastIndexOf('/') + 1);
-                handleUpdateVariable(exchange, function, variableName);
+                handleUpdateVariable(exchange, function, variableName, null);
             } else {
                 sendErrorResponse(exchange, 400, "Missing variable name", "MISSING_PARAMETER");
             }
@@ -1713,15 +1740,27 @@ public class FunctionEndpoints extends AbstractEndpoint {
     /**
      * Handle requests to update a function variable
      */
-    private void handleUpdateVariable(HttpExchange exchange, Function function, String variableName) throws IOException {
+    private void handleUpdateVariable(HttpExchange exchange,
+                                      Function function,
+                                      String variableName,
+                                      String variableId) throws IOException {
         try {
             Map<String, String> params = parseJsonPostParams(exchange);
             String newName = params.get("name");
             String newDataType = params.get("data_type");
             String comment = params.get("comment");
+            String requestedVariableId = params.get("variable_id");
+            String effectiveVariableId = requestedVariableId != null && !requestedVariableId.isBlank() ?
+                requestedVariableId : variableId;
 
             if (newName == null && newDataType == null && comment == null) {
                 sendErrorResponse(exchange, 400, "Missing update parameters - name, data_type, or comment required", "MISSING_PARAMETER");
+                return;
+            }
+
+            if ((variableName == null || variableName.isBlank()) &&
+                (effectiveVariableId == null || effectiveVariableId.isBlank())) {
+                sendErrorResponse(exchange, 400, "Missing variable identifier - variable name or variable_id required", "MISSING_PARAMETER");
                 return;
             }
 
@@ -1772,9 +1811,9 @@ public class FunctionEndpoints extends AbstractEndpoint {
             final HighFunction targetHighFunction = highFunc;
 
             Map<String, Object> updateResult = TransactionHelper.executeInTransaction(program,
-                "Update variable " + variableName + " in " + function.getName(), () -> {
+                "Update variable in " + function.getName(), () -> {
                 try {
-                    return updateFunctionVariable(function, variableName, targetName, targetDataType, targetHighFunction);
+                    return updateFunctionVariable(function, variableName, effectiveVariableId, targetName, targetDataType, targetHighFunction);
                 } catch (Exception e) {
                     Msg.error(this, "Error updating variable: " + e.getMessage(), e);
                     throw e;
@@ -1792,7 +1831,8 @@ public class FunctionEndpoints extends AbstractEndpoint {
 
                 sendJsonResponse(exchange, builder.build(), 200);
             } else {
-                sendErrorResponse(exchange, 404, "Function resource not found: variables/" + variableName, "RESOURCE_NOT_FOUND");
+                String missingIdentifier = effectiveVariableId != null ? effectiveVariableId : variableName;
+                sendErrorResponse(exchange, 404, "Function variable not found: " + missingIdentifier, "RESOURCE_NOT_FOUND");
             }
         } catch (Exception e) {
             sendErrorResponse(exchange, 500, "Error processing variable update request: " + e.getMessage(), "INTERNAL_ERROR");
@@ -1811,15 +1851,27 @@ public class FunctionEndpoints extends AbstractEndpoint {
      *   as_pointer (optional, default true): apply struct* when true, struct when false
      *   new_name (optional): rename variable while applying type
      */
-    private void handleApplyStructToVariable(HttpExchange exchange, Function function, String variableName) throws IOException {
+    private void handleApplyStructToVariable(HttpExchange exchange,
+                                             Function function,
+                                             String variableName,
+                                             String variableId) throws IOException {
         try {
             Map<String, String> params = parseJsonPostParams(exchange);
             String structName = params.get("struct_name");
             String asPointerStr = params.getOrDefault("as_pointer", "true");
             String newName = params.get("new_name");
+            String requestedVariableId = params.get("variable_id");
+            String effectiveVariableId = requestedVariableId != null && !requestedVariableId.isBlank() ?
+                requestedVariableId : variableId;
 
             if (structName == null || structName.isBlank()) {
                 sendErrorResponse(exchange, 400, "Missing required parameter: struct_name", "MISSING_PARAMETER");
+                return;
+            }
+
+            if ((variableName == null || variableName.isBlank()) &&
+                (effectiveVariableId == null || effectiveVariableId.isBlank())) {
+                sendErrorResponse(exchange, 400, "Missing variable identifier - variable name or variable_id required", "MISSING_PARAMETER");
                 return;
             }
 
@@ -1862,8 +1914,8 @@ public class FunctionEndpoints extends AbstractEndpoint {
             final HighFunction finalHighFunc = highFunc;
 
             Map<String, Object> updateResult = TransactionHelper.executeInTransaction(program,
-                "Apply struct type to variable " + variableName + " in " + function.getName(), () ->
-                    updateFunctionVariable(function, variableName, targetName, finalTargetType, finalHighFunc)
+                "Apply struct type to variable in " + function.getName(), () ->
+                    updateFunctionVariable(function, variableName, effectiveVariableId, targetName, finalTargetType, finalHighFunc)
             );
 
             if (cache != null) {
@@ -1871,7 +1923,8 @@ public class FunctionEndpoints extends AbstractEndpoint {
             }
 
             if (updateResult == null) {
-                sendErrorResponse(exchange, 404, "Function resource not found: variables/" + variableName, "RESOURCE_NOT_FOUND");
+                String missingIdentifier = effectiveVariableId != null ? effectiveVariableId : variableName;
+                sendErrorResponse(exchange, 404, "Function variable not found: " + missingIdentifier, "RESOURCE_NOT_FOUND");
                 return;
             }
 
@@ -1887,7 +1940,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         }
     }
 
-    private DataType resolveStructDataType(Program program, String structName) {
+    DataType resolveStructDataType(Program program, String structName) {
         DataType direct = GhidraUtil.resolveDataType(program, structName);
         if (direct instanceof Structure) {
             return direct;
@@ -1905,26 +1958,32 @@ public class FunctionEndpoints extends AbstractEndpoint {
         return found[0];
     }
 
-    private Map<String, Object> updateFunctionVariable(Function function,
-                                                       String variableName,
-                                                       String targetName,
-                                                       DataType targetDataType,
-                                                       HighFunction highFunc) throws Exception {
+    Map<String, Object> updateFunctionVariable(Function function,
+                                               String variableName,
+                                               String variableId,
+                                               String targetName,
+                                               DataType targetDataType,
+                                               HighFunction highFunc) throws Exception {
         if (highFunc != null) {
             for (Iterator<HighSymbol> symbolIter = highFunc.getLocalSymbolMap().getSymbols(); symbolIter.hasNext();) {
                 HighSymbol symbol = symbolIter.next();
-                if (symbol.getName().equals(variableName)) {
-                    String effectiveName = targetName != null ? targetName : symbol.getName();
-                    HighFunctionDBUtil.updateDBVariable(symbol, effectiveName, targetDataType, SourceType.USER_DEFINED);
-                    return buildVariableUpdateResult(function, variableName, effectiveName,
-                        targetDataType != null ? targetDataType.getName() : symbol.getDataType().getName(),
-                        targetName != null, targetDataType != null);
+                if (!matchesVariable(symbol, variableName, variableId)) {
+                    continue;
                 }
+
+                String effectiveName = targetName != null ? targetName : symbol.getName();
+                HighFunctionDBUtil.updateDBVariable(symbol, effectiveName, targetDataType, SourceType.USER_DEFINED);
+                return buildVariableUpdateResult(function,
+                    symbol.getName(),
+                    GhidraUtil.getStableVariableId(symbol),
+                    effectiveName,
+                    targetDataType != null ? targetDataType.getName() : symbol.getDataType().getName(),
+                    targetName != null, targetDataType != null);
             }
         }
 
         for (Variable variable : function.getAllVariables()) {
-            if (!variable.getName().equals(variableName)) {
+            if (!matchesVariable(variable, variableName, variableId)) {
                 continue;
             }
 
@@ -1936,7 +1995,10 @@ public class FunctionEndpoints extends AbstractEndpoint {
                 variable.setDataType(targetDataType, SourceType.USER_DEFINED);
             }
 
-            return buildVariableUpdateResult(function, variableName, effectiveName,
+            return buildVariableUpdateResult(function,
+                variable.getName(),
+                GhidraUtil.getStableVariableId(variable),
+                effectiveName,
                 targetDataType != null ? targetDataType.getName() : variable.getDataType().getName(),
                 targetName != null, targetDataType != null);
         }
@@ -1944,8 +2006,23 @@ public class FunctionEndpoints extends AbstractEndpoint {
         return null;
     }
 
+    private boolean matchesVariable(HighSymbol symbol, String variableName, String variableId) {
+        if (variableId != null && !variableId.isBlank()) {
+            return variableId.equals(GhidraUtil.getStableVariableId(symbol));
+        }
+        return variableName != null && variableName.equals(symbol.getName());
+    }
+
+    private boolean matchesVariable(Variable variable, String variableName, String variableId) {
+        if (variableId != null && !variableId.isBlank()) {
+            return variableId.equals(GhidraUtil.getStableVariableId(variable));
+        }
+        return variableName != null && variableName.equals(variable.getName());
+    }
+
     private Map<String, Object> buildVariableUpdateResult(Function function,
                                                           String previousName,
+                                                          String variableId,
                                                           String effectiveName,
                                                           String dataTypeName,
                                                           boolean renamed,
@@ -1953,6 +2030,7 @@ public class FunctionEndpoints extends AbstractEndpoint {
         Map<String, Object> result = new HashMap<>();
         result.put("name", effectiveName);
         result.put("previous_name", previousName);
+        result.put("variable_id", variableId);
         result.put("data_type", dataTypeName);
         result.put("function", function.getName());
         result.put("address", function.getEntryPoint().toString());

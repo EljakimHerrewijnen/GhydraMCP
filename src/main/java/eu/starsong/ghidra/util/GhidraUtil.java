@@ -16,6 +16,8 @@ import ghidra.program.model.listing.ParameterImpl;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.listing.Variable;
 import ghidra.program.model.pcode.HighFunction;
+import ghidra.program.model.pcode.HighSymbol;
+import ghidra.program.model.symbol.Symbol;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
@@ -25,6 +27,11 @@ import java.util.List;
 import java.util.Map;
 
 public class GhidraUtil {
+
+    private static final String DB_VARIABLE_ID_PREFIX = "db:";
+    private static final String PARAMETER_VARIABLE_ID_PREFIX = "param:";
+    private static final String LOCAL_VARIABLE_ID_PREFIX = "local:";
+    private static final String DECOMPILER_VARIABLE_ID_PREFIX = "decomp:";
 
     public static class SignatureUpdateResult {
         private final boolean success;
@@ -560,10 +567,14 @@ public class GhidraUtil {
         for (Parameter param : function.getParameters()) {
             Map<String, Object> varInfo = new HashMap<>();
             varInfo.put("name", param.getName());
-            varInfo.put("type", param.getDataType().getName());
+            String dataTypeName = param.getDataType().getName();
+            varInfo.put("type", dataTypeName);
+            varInfo.put("dataType", dataTypeName);
             varInfo.put("isParameter", true);
             varInfo.put("storage", param.getVariableStorage().toString());
+            varInfo.put("ordinal", param.getOrdinal());
             varInfo.put("source", "database");
+            varInfo.put("variableId", getStableVariableId(param));
             variables.add(varInfo);
         }
 
@@ -575,10 +586,14 @@ public class GhidraUtil {
 
             Map<String, Object> varInfo = new HashMap<>();
             varInfo.put("name", var.getName());
-            varInfo.put("type", var.getDataType().getName());
+            String dataTypeName = var.getDataType().getName();
+            varInfo.put("type", dataTypeName);
+            varInfo.put("dataType", dataTypeName);
             varInfo.put("isParameter", false);
             varInfo.put("storage", var.getVariableStorage().toString());
+            varInfo.put("firstUseOffset", var.getFirstUseOffset());
             varInfo.put("source", "database");
+            varInfo.put("variableId", getStableVariableId(var));
             variables.add(varInfo);
         }
 
@@ -600,12 +615,15 @@ public class GhidraUtil {
                 if (!alreadyAdded) {
                     Map<String, Object> varInfo = new HashMap<>();
                     varInfo.put("name", highSymbol.getName());
-                    varInfo.put("type", highSymbol.getDataType() != null ?
-                        highSymbol.getDataType().getName() : "unknown");
+                    String dataTypeName = highSymbol.getDataType() != null ?
+                        highSymbol.getDataType().getName() : "unknown";
+                    varInfo.put("type", dataTypeName);
+                    varInfo.put("dataType", dataTypeName);
                     varInfo.put("isParameter", highSymbol.isParameter());
                     varInfo.put("storage", highSymbol.getStorage() != null ?
                         highSymbol.getStorage().toString() : "unknown");
                     varInfo.put("source", "decompiler");
+                    varInfo.put("variableId", getStableVariableId(highSymbol));
 
                     if (highSymbol.getPCAddress() != null) {
                         varInfo.put("pcAddress", highSymbol.getPCAddress().toString());
@@ -635,10 +653,14 @@ public class GhidraUtil {
         for (Parameter param : function.getParameters()) {
             Map<String, Object> varInfo = new HashMap<>();
             varInfo.put("name", param.getName());
-            varInfo.put("type", param.getDataType().getName());
+            String dataTypeName = param.getDataType().getName();
+            varInfo.put("type", dataTypeName);
+            varInfo.put("dataType", dataTypeName);
             varInfo.put("isParameter", true);
             varInfo.put("storage", param.getVariableStorage().toString());
+            varInfo.put("ordinal", param.getOrdinal());
             varInfo.put("source", "database");
+            varInfo.put("variableId", getStableVariableId(param));
             variables.add(varInfo);
         }
 
@@ -650,10 +672,14 @@ public class GhidraUtil {
 
             Map<String, Object> varInfo = new HashMap<>();
             varInfo.put("name", var.getName());
-            varInfo.put("type", var.getDataType().getName());
+            String dataTypeName = var.getDataType().getName();
+            varInfo.put("type", dataTypeName);
+            varInfo.put("dataType", dataTypeName);
             varInfo.put("isParameter", false);
             varInfo.put("storage", var.getVariableStorage().toString());
+            varInfo.put("firstUseOffset", var.getFirstUseOffset());
             varInfo.put("source", "database");
+            varInfo.put("variableId", getStableVariableId(var));
             variables.add(varInfo);
         }
 
@@ -684,12 +710,15 @@ public class GhidraUtil {
                         if (!alreadyAdded) {
                             Map<String, Object> varInfo = new HashMap<>();
                             varInfo.put("name", highSymbol.getName());
-                            varInfo.put("type", highSymbol.getDataType() != null ?
-                                highSymbol.getDataType().getName() : "unknown");
+                            String dataTypeName = highSymbol.getDataType() != null ?
+                                highSymbol.getDataType().getName() : "unknown";
+                            varInfo.put("type", dataTypeName);
+                            varInfo.put("dataType", dataTypeName);
                             varInfo.put("isParameter", highSymbol.isParameter());
                             varInfo.put("storage", highSymbol.getStorage() != null ?
                                 highSymbol.getStorage().toString() : "unknown");
                             varInfo.put("source", "decompiler");
+                            varInfo.put("variableId", getStableVariableId(highSymbol));
 
                             // Add PC address if available
                             if (highSymbol.getPCAddress() != null) {
@@ -710,6 +739,36 @@ public class GhidraUtil {
         }
 
         return variables;
+    }
+
+    public static String getStableVariableId(Variable variable) {
+        if (variable == null) {
+            return null;
+        }
+
+        Symbol symbol = variable.getSymbol();
+        if (symbol != null) {
+            return DB_VARIABLE_ID_PREFIX + symbol.getID();
+        }
+
+        if (variable instanceof Parameter) {
+            return PARAMETER_VARIABLE_ID_PREFIX + ((Parameter) variable).getOrdinal();
+        }
+
+        return LOCAL_VARIABLE_ID_PREFIX + variable.getVariableStorage() + ":" + variable.getFirstUseOffset();
+    }
+
+    public static String getStableVariableId(HighSymbol highSymbol) {
+        if (highSymbol == null) {
+            return null;
+        }
+
+        Symbol symbol = highSymbol.getSymbol();
+        if (symbol != null) {
+            return DB_VARIABLE_ID_PREFIX + symbol.getID();
+        }
+
+        return DECOMPILER_VARIABLE_ID_PREFIX + highSymbol.getId();
     }
 
     /**

@@ -2,6 +2,7 @@ package eu.starsong.ghidra.endpoints;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import eu.starsong.ghidra.api.ResponseBuilder;
@@ -14,6 +15,7 @@ import ghidra.program.model.address.AddressFactory;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryAccessException;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.mem.MemoryConflictException;
 import ghidra.program.model.address.AddressOverflowException;
 import ghidra.program.model.listing.CommentType;
 import ghidra.program.model.listing.Program;
@@ -24,6 +26,8 @@ import ghidra.util.task.TaskMonitor;
 import java.io.IOException;
 import java.awt.Color;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.swing.SwingUtilities;
@@ -32,7 +36,41 @@ public class MemoryEndpoints extends AbstractEndpoint {
 
     private static final int DEFAULT_MEMORY_LENGTH = 16;
     private static final int MAX_MEMORY_LENGTH = 1048576;
+    private static final String MEMORY_BLOCK_MODE_CREATE = "create";
+    private static final String MEMORY_BLOCK_MODE_CREATE_OR_UPDATE = "create_or_update";
     private PluginTool tool;
+
+    private static final class MemoryBlockRequest {
+        private final String name;
+        private final Address start;
+        private final long size;
+        private final Address end;
+        private final boolean readable;
+        private final boolean writable;
+        private final boolean executable;
+        private final boolean initialized;
+        private final String mode;
+
+        private MemoryBlockRequest(String name,
+                                   Address start,
+                                   long size,
+                                   Address end,
+                                   boolean readable,
+                                   boolean writable,
+                                   boolean executable,
+                                   boolean initialized,
+                                   String mode) {
+            this.name = name;
+            this.start = start;
+            this.size = size;
+            this.end = end;
+            this.readable = readable;
+            this.writable = writable;
+            this.executable = executable;
+            this.initialized = initialized;
+            this.mode = mode;
+        }
+    }
 
     public MemoryEndpoints(Program program, int port) {
         super(program, port);
@@ -1165,6 +1203,13 @@ private void handleDisassemblyAtAddress(HttpExchange exchange, String addressStr
                 sendJsonResponse(exchange, builder.build(), 200);
 
             } else if ("POST".equals(exchange.getRequestMethod())) {
+                String path = exchange.getRequestURI().getPath();
+                boolean ensurePath = "/memory/blocks/ensure".equals(path) || "/memory/blocks/ensure/".equals(path);
+                if (!ensurePath && !"/memory/blocks".equals(path) && !"/memory/blocks/".equals(path)) {
+                    sendErrorResponse(exchange, 404, "Memory block resource not found: " + path, "RESOURCE_NOT_FOUND");
+                    return;
+                }
+
                 Program program = getCurrentProgram();
                 if (program == null) {
                     sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
@@ -1172,125 +1217,82 @@ private void handleDisassemblyAtAddress(HttpExchange exchange, String addressStr
                 }
 
                 Map<String, String> payload = parseJsonPostParams(exchange);
-                String name = payload.get("name");
-                String addressStr = payload.get("address");
-                String sizeStr = payload.get("size");
-
-                if (name == null || name.isBlank()) {
-                    sendErrorResponse(exchange, 400, "'name' field required", "MISSING_PARAMETER");
-                    return;
-                }
-                if (addressStr == null || addressStr.isBlank()) {
-                    sendErrorResponse(exchange, 400, "'address' field required", "MISSING_PARAMETER");
-                    return;
-                }
-                if (sizeStr == null || sizeStr.isBlank()) {
-                    sendErrorResponse(exchange, 400, "'size' field required", "MISSING_PARAMETER");
-                    return;
-                }
-
-                long size;
-                try {
-                    size = Long.parseLong(sizeStr);
-                } catch (NumberFormatException nfe) {
-                    sendErrorResponse(exchange, 400, "'size' must be a positive integer", "INVALID_PARAMETER");
-                    return;
-                }
-                if (size <= 0) {
-                    sendErrorResponse(exchange, 400, "'size' must be greater than 0", "INVALID_PARAMETER");
-                    return;
-                }
-
-                boolean readable = Boolean.parseBoolean(Optional.ofNullable(payload.get("readable")).orElse("true"));
-                boolean writable = Boolean.parseBoolean(Optional.ofNullable(payload.get("writable")).orElse("false"));
-                boolean executable = Boolean.parseBoolean(Optional.ofNullable(payload.get("executable")).orElse("false"));
-                boolean initialized = Boolean.parseBoolean(Optional.ofNullable(payload.get("initialized")).orElse("false"));
-
-                AddressFactory addressFactory = program.getAddressFactory();
-                Address start;
-                try {
-                    start = addressFactory.getAddress(addressStr);
-                } catch (Exception e) {
-                    sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_PARAMETER");
-                    return;
-                }
-                if (start == null) {
-                    sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_PARAMETER");
-                    return;
-                }
-
-                Address end;
-                try {
-                    end = start.addNoWrap(size - 1);
-                } catch (AddressOverflowException aoe) {
-                    sendErrorResponse(exchange, 400, "Address range overflows address space", "INVALID_PARAMETER");
+                MemoryBlockRequest request = parseMemoryBlockRequest(exchange, program, payload);
+                if (request == null) {
                     return;
                 }
 
                 Memory memory = program.getMemory();
-                if (memory.getBlock(name) != null) {
-                    sendErrorResponse(exchange, 409, "Memory block already exists: " + name, "ALREADY_EXISTS");
-                    return;
-                }
+                boolean ensureMode = ensurePath || MEMORY_BLOCK_MODE_CREATE_OR_UPDATE.equalsIgnoreCase(request.mode);
 
-                if (memory.intersects(start, end)) {
-                    sendErrorResponse(exchange, 409, "Requested range overlaps existing memory block", "OVERLAPPING_BLOCK");
-                    return;
-                }
-
-                final AtomicReference<MemoryBlock> createdRef = new AtomicReference<>();
+                MemoryBlock resultBlock;
+                String action;
                 try {
-                    TransactionHelper.executeInTransaction(program, "Create Memory Block", () -> {
-                        MemoryBlock block;
-                        if (initialized) {
-                            // Use reflection for broad Ghidra-version compatibility around checked exceptions.
-                            block = (MemoryBlock) memory.getClass()
-                                .getMethod("createInitializedBlock", String.class, Address.class, long.class, byte.class, TaskMonitor.class, boolean.class)
-                                .invoke(memory, name, start, size, (byte) 0x00, TaskMonitor.DUMMY, false);
-                        } else {
-                            // Use reflection for broad Ghidra-version compatibility around checked exceptions.
-                            block = (MemoryBlock) memory.getClass()
-                                .getMethod("createUninitializedBlock", String.class, Address.class, long.class, boolean.class)
-                                .invoke(memory, name, start, size, false);
+                    if (ensureMode) {
+                        EnsureBlockResult ensureResult = ensureMemoryBlock(program, memory, request);
+                        resultBlock = ensureResult.block;
+                        action = ensureResult.action;
+                    } else {
+                        MemoryBlock existingBlock = memory.getBlock(request.name);
+                        if (existingBlock != null) {
+                            Map<String, Object> details = new LinkedHashMap<>();
+                            details.put("error_code", "E_BLOCK_EXISTS");
+                            details.put("conflicting_block_name", existingBlock.getName());
+                            details.put("conflicting_range_start", existingBlock.getStart().toString());
+                            details.put("conflicting_range_end", existingBlock.getEnd().toString());
+                            details.put("required_action", "use ensure_memory_block or choose a different name");
+                            sendDetailedErrorResponse(exchange, 409,
+                                "Memory block already exists: " + request.name,
+                                "ALREADY_EXISTS",
+                                details);
+                            return;
                         }
-                        block.setRead(readable);
-                        block.setWrite(writable);
-                        block.setExecute(executable);
-                        createdRef.set(block);
-                        return true;
-                    });
+
+                        MemoryBlock conflictingBlock = findIntersectingBlock(memory, request.start, request.end, null);
+                        if (conflictingBlock != null) {
+                            sendBlockOverlapError(exchange, conflictingBlock, request.start, request.end);
+                            return;
+                        }
+
+                        resultBlock = TransactionHelper.executeInTransaction(program, "Create Memory Block", () ->
+                            createMemoryBlock(memory, request)
+                        );
+                        action = "created";
+                    }
                 } catch (TransactionHelper.TransactionException tex) {
-                    sendErrorResponse(exchange, 500, "Failed to create memory block: " + tex.getMessage(), "MEMORY_BLOCK_CREATE_FAILED");
+                    sendMemoryBlockMutationError(exchange, tex);
                     return;
                 } catch (Exception e) {
-                    sendErrorResponse(exchange, 500, "Unexpected error creating memory block: " + e.getMessage(), "MEMORY_BLOCK_CREATE_FAILED");
+                    sendMemoryBlockMutationError(exchange, e);
                     return;
                 }
 
-                MemoryBlock created = createdRef.get();
-                if (created == null) {
-                    sendErrorResponse(exchange, 500, "Memory block creation returned no block", "MEMORY_BLOCK_CREATE_FAILED");
+                if (resultBlock == null) {
+                    sendDetailedErrorResponse(exchange, 500,
+                        "Memory block creation returned no block",
+                        "MEMORY_BLOCK_CREATE_FAILED",
+                        Map.of(
+                            "error_code", "E_INTERNAL_ERROR",
+                            "required_action", "retry"
+                        ));
                     return;
                 }
 
-                Map<String, Object> result = new HashMap<>();
-                result.put("name", created.getName());
-                result.put("start", created.getStart().toString());
-                result.put("end", created.getEnd().toString());
-                result.put("size", created.getSize());
-                result.put("permissions", getPermissionString(created));
-                result.put("isInitialized", created.isInitialized());
-                result.put("isLoaded", created.isLoaded());
-                result.put("isMapped", created.isMapped());
+                Map<String, Object> result = buildMemoryBlockInfo(resultBlock);
+                result.put("action", action);
+                result.put("created", "created".equals(action));
+                result.put("updated", "updated".equals(action));
+                result.put("unchanged", "unchanged".equals(action));
 
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
                     .result(result)
-                    .addLink("self", "/memory/blocks")
+                    .addLink("self", ensureMode ? "/memory/blocks/ensure" : "/memory/blocks")
                     .addLink("memory", "/memory")
                     .addLink("segments", "/segments");
 
-                sendJsonResponse(exchange, builder.build(), 201);
+                int statusCode = "created".equals(action) ? 201 : 200;
+                sendJsonResponse(exchange, builder.build(), statusCode);
 
             } else {
                 sendErrorResponse(exchange, 405, "Method Not Allowed");
@@ -1299,6 +1301,371 @@ private void handleDisassemblyAtAddress(HttpExchange exchange, String addressStr
             Msg.error(this, "Error in /memory/blocks endpoint", e);
             sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage());
         }
+    }
+
+    private MemoryBlockRequest parseMemoryBlockRequest(HttpExchange exchange,
+                                                       Program program,
+                                                       Map<String, String> payload) throws IOException {
+        String name = payload.get("name");
+        String addressStr = Optional.ofNullable(payload.get("address")).orElse(payload.get("start"));
+        String sizeStr = payload.get("size");
+        String mode = Optional.ofNullable(payload.get("mode")).orElse(MEMORY_BLOCK_MODE_CREATE);
+
+        if (name == null || name.isBlank()) {
+            sendErrorResponse(exchange, 400, "'name' field required", "MISSING_PARAMETER");
+            return null;
+        }
+        if (addressStr == null || addressStr.isBlank()) {
+            sendErrorResponse(exchange, 400, "'address' field required", "MISSING_PARAMETER");
+            return null;
+        }
+        if (sizeStr == null || sizeStr.isBlank()) {
+            sendErrorResponse(exchange, 400, "'size' field required", "MISSING_PARAMETER");
+            return null;
+        }
+        if (!MEMORY_BLOCK_MODE_CREATE.equalsIgnoreCase(mode) &&
+            !MEMORY_BLOCK_MODE_CREATE_OR_UPDATE.equalsIgnoreCase(mode)) {
+            sendErrorResponse(exchange, 400,
+                "'mode' must be one of: create, create_or_update",
+                "INVALID_PARAMETER");
+            return null;
+        }
+
+        long size;
+        try {
+            size = Long.parseLong(sizeStr);
+        } catch (NumberFormatException nfe) {
+            sendErrorResponse(exchange, 400, "'size' must be a positive integer", "INVALID_PARAMETER");
+            return null;
+        }
+        if (size <= 0) {
+            sendErrorResponse(exchange, 400, "'size' must be greater than 0", "INVALID_PARAMETER");
+            return null;
+        }
+
+        AddressFactory addressFactory = program.getAddressFactory();
+        Address start;
+        try {
+            start = addressFactory.getAddress(addressStr);
+        } catch (Exception e) {
+            sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_PARAMETER");
+            return null;
+        }
+        if (start == null) {
+            sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_PARAMETER");
+            return null;
+        }
+
+        Address end;
+        try {
+            end = start.addNoWrap(size - 1);
+        } catch (AddressOverflowException aoe) {
+            sendErrorResponse(exchange, 400, "Address range overflows address space", "INVALID_PARAMETER");
+            return null;
+        }
+
+        boolean readable = Boolean.parseBoolean(Optional.ofNullable(payload.get("readable")).orElse("true"));
+        boolean writable = Boolean.parseBoolean(Optional.ofNullable(payload.get("writable")).orElse("false"));
+        boolean executable = Boolean.parseBoolean(Optional.ofNullable(payload.get("executable")).orElse("false"));
+        boolean initialized = Boolean.parseBoolean(Optional.ofNullable(payload.get("initialized")).orElse("false"));
+
+        return new MemoryBlockRequest(
+            name,
+            start,
+            size,
+            end,
+            readable,
+            writable,
+            executable,
+            initialized,
+            mode
+        );
+    }
+
+    static final class EnsureBlockResult {
+        private final MemoryBlock block;
+        private final String action;
+
+        private EnsureBlockResult(MemoryBlock block, String action) {
+            this.block = block;
+            this.action = action;
+        }
+
+        MemoryBlock getBlock() {
+            return block;
+        }
+
+        String getAction() {
+            return action;
+        }
+    }
+
+    private EnsureBlockResult ensureMemoryBlock(Program program,
+                                                Memory memory,
+                                                MemoryBlockRequest request) throws Exception {
+        return TransactionHelper.executeInTransaction(program, "Ensure Memory Block", () ->
+            ensureMemoryBlockInTransaction(memory, request)
+        );
+    }
+
+    EnsureBlockResult ensureMemoryBlockInTransaction(Memory memory,
+                                                     String name,
+                                                     Address start,
+                                                     long size,
+                                                     boolean readable,
+                                                     boolean writable,
+                                                     boolean executable,
+                                                     boolean initialized) throws Exception {
+        Address end = start.addNoWrap(size - 1);
+        MemoryBlockRequest request = new MemoryBlockRequest(
+            name,
+            start,
+            size,
+            end,
+            readable,
+            writable,
+            executable,
+            initialized,
+            MEMORY_BLOCK_MODE_CREATE_OR_UPDATE
+        );
+        return ensureMemoryBlockInTransaction(memory, request);
+    }
+
+    private EnsureBlockResult ensureMemoryBlockInTransaction(Memory memory,
+                                                             MemoryBlockRequest request) throws Exception {
+        MemoryBlock existingBlock = memory.getBlock(request.name);
+        if (existingBlock == null) {
+            MemoryBlock conflictingBlock = findIntersectingBlock(memory, request.start, request.end, null);
+            if (conflictingBlock != null) {
+                throw new MemoryConflictException("Requested range overlaps existing memory block: " + conflictingBlock.getName());
+            }
+
+            MemoryBlock created = createMemoryBlock(memory, request);
+            return new EnsureBlockResult(created, "created");
+        }
+
+        MemoryBlock conflictingBlock = findIntersectingBlock(memory, request.start, request.end, existingBlock);
+        if (conflictingBlock != null) {
+            throw new MemoryConflictException("Requested range overlaps existing memory block: " + conflictingBlock.getName());
+        }
+
+        boolean sameRange = existingBlock.getStart().equals(request.start) && existingBlock.getSize() == request.size;
+        boolean samePermissions = existingBlock.isRead() == request.readable &&
+            existingBlock.isWrite() == request.writable &&
+            existingBlock.isExecute() == request.executable;
+        boolean sameInitialization = existingBlock.isInitialized() == request.initialized;
+
+        if (sameRange && samePermissions && sameInitialization) {
+            return new EnsureBlockResult(existingBlock, "unchanged");
+        }
+
+        MemoryBlock updated = existingBlock;
+        if (!sameRange || !sameInitialization) {
+            removeBlock(memory, existingBlock);
+            updated = createMemoryBlock(memory, request);
+        } else {
+            applyBlockPermissions(updated, request.readable, request.writable, request.executable);
+        }
+
+        return new EnsureBlockResult(updated, "updated");
+    }
+
+    private MemoryBlock createMemoryBlock(Memory memory, MemoryBlockRequest request)
+        throws Exception {
+
+        MemoryBlock block;
+        if (request.initialized) {
+            block = createInitializedBlock(memory, request);
+        } else {
+            block = createUninitializedBlock(memory, request);
+        }
+
+        applyBlockPermissions(block, request.readable, request.writable, request.executable);
+        return block;
+    }
+
+    private MemoryBlock createInitializedBlock(Memory memory, MemoryBlockRequest request) throws Exception {
+        return (MemoryBlock) invokeMemoryMethod(
+            memory,
+            "createInitializedBlock",
+            new Class<?>[] { String.class, Address.class, long.class, byte.class, TaskMonitor.class, boolean.class },
+            request.name,
+            request.start,
+            request.size,
+            (byte) 0x00,
+            TaskMonitor.DUMMY,
+            false
+        );
+    }
+
+    private MemoryBlock createUninitializedBlock(Memory memory, MemoryBlockRequest request) throws Exception {
+        return (MemoryBlock) invokeMemoryMethod(
+            memory,
+            "createUninitializedBlock",
+            new Class<?>[] { String.class, Address.class, long.class, boolean.class },
+            request.name,
+            request.start,
+            request.size,
+            false
+        );
+    }
+
+    private void removeBlock(Memory memory, MemoryBlock block) throws Exception {
+        invokeMemoryMethod(
+            memory,
+            "removeBlock",
+            new Class<?>[] { MemoryBlock.class, TaskMonitor.class },
+            block,
+            TaskMonitor.DUMMY
+        );
+    }
+
+    private void applyBlockPermissions(MemoryBlock block,
+                                       boolean readable,
+                                       boolean writable,
+                                       boolean executable) throws Exception {
+        invokeMemoryBlockMethod(block, "setRead", readable);
+        invokeMemoryBlockMethod(block, "setWrite", writable);
+        invokeMemoryBlockMethod(block, "setExecute", executable);
+    }
+
+    private Object invokeMemoryMethod(Memory memory,
+                                      String methodName,
+                                      Class<?>[] parameterTypes,
+                                      Object... args) throws Exception {
+        Method method = Memory.class.getMethod(methodName, parameterTypes);
+        return invokeReflective(method, memory, args);
+    }
+
+    private void invokeMemoryBlockMethod(MemoryBlock block,
+                                         String methodName,
+                                         boolean value) throws Exception {
+        Method method = MemoryBlock.class.getMethod(methodName, boolean.class);
+        invokeReflective(method, block, value);
+    }
+
+    private Object invokeReflective(Method method, Object target, Object... args) throws Exception {
+        try {
+            return method.invoke(target, args);
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception) {
+                throw (Exception) cause;
+            }
+            throw new RuntimeException(cause);
+        }
+    }
+
+    private MemoryBlock findIntersectingBlock(Memory memory,
+                                              Address start,
+                                              Address end,
+                                              MemoryBlock ignoredBlock) {
+        for (MemoryBlock block : memory.getBlocks()) {
+            if (ignoredBlock != null && block.equals(ignoredBlock)) {
+                continue;
+            }
+            if (!(block.getEnd().compareTo(start) < 0 || block.getStart().compareTo(end) > 0)) {
+                return block;
+            }
+        }
+        return null;
+    }
+
+    Map<String, Object> buildMemoryBlockInfo(MemoryBlock block) {
+        Map<String, Object> result = new HashMap<>();
+        result.put("name", block.getName());
+        result.put("start", block.getStart().toString());
+        result.put("end", block.getEnd().toString());
+        result.put("size", block.getSize());
+        result.put("permissions", getPermissionString(block));
+        result.put("isInitialized", block.isInitialized());
+        result.put("isLoaded", block.isLoaded());
+        result.put("isMapped", block.isMapped());
+        return result;
+    }
+
+    private void sendBlockOverlapError(HttpExchange exchange,
+                                       MemoryBlock conflictingBlock,
+                                       Address requestedStart,
+                                       Address requestedEnd) throws IOException {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("error_code", "E_BLOCK_OVERLAP");
+        details.put("conflicting_block_name", conflictingBlock.getName());
+        details.put("conflicting_range_start", conflictingBlock.getStart().toString());
+        details.put("conflicting_range_end", conflictingBlock.getEnd().toString());
+        details.put("requested_range_start", requestedStart.toString());
+        details.put("requested_range_end", requestedEnd.toString());
+        details.put("required_action", "adjust range");
+        sendDetailedErrorResponse(exchange, 409,
+            "Requested range overlaps existing memory block",
+            "OVERLAPPING_BLOCK",
+            details);
+    }
+
+    private void sendMemoryBlockMutationError(HttpExchange exchange, Exception error) throws IOException {
+        Throwable cause = error;
+        while (cause.getCause() != null && cause.getCause() != cause) {
+            cause = cause.getCause();
+        }
+
+        String causeMessage = Optional.ofNullable(cause.getMessage()).orElse(error.getMessage());
+        String errorCode = "E_TRANSACTION_FAILED";
+        String requiredAction = "retry";
+        int statusCode = 500;
+
+        if (cause instanceof MemoryConflictException) {
+            errorCode = "E_BLOCK_OVERLAP";
+            requiredAction = "adjust range";
+            statusCode = 409;
+        } else if (causeMessage != null) {
+            String lowered = causeMessage.toLowerCase(Locale.ROOT);
+            if (lowered.contains("not checked out") || lowered.contains("checkout")) {
+                errorCode = "E_NOT_CHECKED_OUT";
+                requiredAction = "checkout";
+                statusCode = 409;
+            } else if (lowered.contains("lock")) {
+                errorCode = "E_PROGRAM_LOCKED";
+                requiredAction = "checkout";
+                statusCode = 409;
+            } else if (lowered.contains("transaction")) {
+                errorCode = "E_PROGRAM_LOCKED";
+                requiredAction = "close transaction";
+                statusCode = 409;
+            }
+        }
+
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("error_code", errorCode);
+        details.put("required_action", requiredAction);
+        if (causeMessage != null && !causeMessage.isBlank()) {
+            details.put("cause", causeMessage);
+        }
+
+        sendDetailedErrorResponse(exchange,
+            statusCode,
+            "Failed to create or update memory block: " + error.getMessage(),
+            "MEMORY_BLOCK_CREATE_FAILED",
+            details);
+    }
+
+    private void sendDetailedErrorResponse(HttpExchange exchange,
+                                           int statusCode,
+                                           String message,
+                                           String code,
+                                           Map<String, Object> details) throws IOException {
+        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            .success(false)
+            .error(message, code);
+
+        JsonObject response = builder.build();
+        JsonObject errorObject = response.getAsJsonObject("error");
+        if (details != null && errorObject != null) {
+            for (Map.Entry<String, Object> entry : details.entrySet()) {
+                errorObject.add(entry.getKey(), new com.google.gson.Gson().toJsonTree(entry.getValue()));
+            }
+        }
+
+        sendJsonResponse(exchange, response, statusCode);
     }
 
     private String getPermissionString(MemoryBlock block) {

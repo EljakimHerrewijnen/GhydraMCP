@@ -62,6 +62,8 @@ The API is organized into namespaces for different types of operations:
 - namespaces_* : For namespace hierarchy
 - variables_* : For global and local variables
 - datatypes_* : For data type management
+- get_capabilities : Discover supported sync and automation features
+- run_batch : Execute supported mutations inside one Ghidra transaction
 """
 
 mcp = FastMCP("GhydraMCP", instructions=instructions)
@@ -636,22 +638,30 @@ def format_variables(response: dict, **kwargs) -> str:
         return format_error(response)
 
     result = response.get("result", {})
-    fn_name = result.get("functionName", "???")
-    params = result.get("parameters", [])
-    locals_list = result.get("localVariables", [])
+    function_info = result.get("function", {}) if isinstance(result, dict) else {}
+    fn_name = function_info.get("name") or result.get("functionName", "???")
+    variables = result.get("variables", []) if isinstance(result, dict) else []
+    params = [var for var in variables if var.get("isParameter")]
+    locals_list = [var for var in variables if not var.get("isParameter")]
 
     lines = [f"Variables for {fn_name}:"]
 
     if params:
         lines.append(f"\nParameters ({len(params)}):")
         for p in params:
-            lines.append(f"  {p.get('dataType', '?'):<20} {p.get('name', '?')}")
+            variable_id = p.get("variableId") or p.get("variable_id") or "-"
+            lines.append(
+                f"  {p.get('dataType', p.get('type', '?')):<20} {p.get('name', '?'):<20} id={variable_id}"
+            )
 
     if locals_list:
         lines.append(f"\nLocal variables ({len(locals_list)}):")
         for v in locals_list:
             storage = v.get('storage', '')
-            lines.append(f"  {v.get('dataType', '?'):<20} {v.get('name', '?'):<20} {storage}")
+            variable_id = v.get("variableId") or v.get("variable_id") or "-"
+            lines.append(
+                f"  {v.get('dataType', v.get('type', '?')):<20} {v.get('name', '?'):<20} {storage:<16} id={variable_id}"
+            )
 
     if not params and not locals_list:
         lines.append("  (no variables)")
@@ -788,13 +798,92 @@ def format_project_files(response: dict, **kwargs) -> str:
     if not response.get("success", False):
         return format_error(response)
 
-    items = response.get("result", [])
+    result = response.get("result", [])
+    if isinstance(result, dict):
+        items = result.get("items", [])
+    else:
+        items = result
     lines = [f"Project files ({len(items)}):", ""]
 
     for f in items:
         path = f.get("path", f.get("name", "???"))
-        ftype = "DIR" if f.get("isFolder") else "   "
+        ftype = "DIR" if f.get("type") == "folder" or f.get("isFolder") else "   "
         lines.append(f"  {ftype}  {path}")
+
+    return "\n".join(lines)
+
+
+def format_capabilities(response: dict, **kwargs) -> str:
+    """Format capability discovery as plain text"""
+    if not response.get("success", False):
+        return format_error(response)
+
+    result = response.get("result", {})
+    features = result.get("features", {})
+    batch_ops = result.get("supportedBatchOperations", [])
+
+    lines = [
+        f"Capabilities (server {result.get('serverVersion', 'unknown')}):",
+        f"Program loaded: {result.get('programLoaded', False)}",
+        "",
+        "Features:",
+    ]
+
+    for name, enabled in features.items():
+        status = "yes" if enabled else "no"
+        lines.append(f"  {status:<3}  {name}")
+
+    if batch_ops:
+        lines.extend(["", "Batch operations:"])
+        for op_name in batch_ops:
+            lines.append(f"  {op_name}")
+
+    return "\n".join(lines)
+
+
+def format_batch_result(response: dict, **kwargs) -> str:
+    """Format batch execution results as plain text"""
+    result = response.get("result", {}) if isinstance(response, dict) else {}
+    operations = result.get("operations", []) if isinstance(result, dict) else []
+    rolled_back = result.get("rolledBack", False) if isinstance(result, dict) else False
+    applied_count = result.get("appliedCount", 0) if isinstance(result, dict) else 0
+    failed_count = result.get("failedCount", 0) if isinstance(result, dict) else 0
+
+    lines = [
+        "Batch transaction:",
+        f"Applied: {applied_count}",
+        f"Failed: {failed_count}",
+        f"Rolled back: {rolled_back}",
+    ]
+
+    transaction_error = result.get("transactionError") if isinstance(result, dict) else None
+    if transaction_error:
+        lines.append(f"Transaction error: {transaction_error}")
+
+    if operations:
+        lines.append("")
+        lines.append("Operations:")
+        for item in operations:
+            index = item.get("index", "?")
+            op_name = item.get("op", "???")
+            if item.get("success"):
+                summary = item.get("result", {})
+                action = summary.get("action") if isinstance(summary, dict) else None
+                if action:
+                    lines.append(f"  [{index}] OK     {op_name} ({action})")
+                else:
+                    lines.append(f"  [{index}] OK     {op_name}")
+            else:
+                error = item.get("error", {})
+                message = error.get("message", "Unknown error") if isinstance(error, dict) else str(error)
+                lines.append(f"  [{index}] FAIL   {op_name}: {message}")
+
+    if not response.get("success", True):
+        error = response.get("error", {})
+        message = error.get("message") if isinstance(error, dict) else None
+        if message:
+            lines.append("")
+            lines.append(f"Status: {message}")
 
     return "\n".join(lines)
 
@@ -989,6 +1078,8 @@ FORMATTERS = {
     "analysis_get_callgraph": format_callgraph,
     "project_info": format_project_info,
     "project_list_files": format_project_files,
+    "get_capabilities": format_capabilities,
+    "run_batch": format_batch_result,
     "classes_list": format_classes_list,
     "symbols_list": format_symbols_list,
     "symbols_imports": format_imports_exports,
@@ -1002,6 +1093,9 @@ FORMATTERS = {
 }
 
 
+FORMAT_FAILED_RESPONSES = {"run_batch"}
+
+
 def text_output(func):
     """Decorator that converts dict responses to plain text using registered formatters"""
     @functools.wraps(func)
@@ -1012,14 +1106,16 @@ def text_output(func):
         if isinstance(response, str):
             return response
 
-        # Check for error first
-        if isinstance(response, dict) and not response.get("success", True):
-            return format_error(response)
-
         # Look up formatter by function name
         formatter = FORMATTERS.get(func.__name__)
         if formatter:
+            if isinstance(response, dict) and not response.get("success", True) and func.__name__ not in FORMAT_FAILED_RESPONSES:
+                return format_error(response)
             return formatter(response, **kwargs)
+
+        # Check for error first
+        if isinstance(response, dict) and not response.get("success", True):
+            return format_error(response)
 
         # Fallback: format_simple_result for mutation operations
         return format_simple_result(response, "Done")
@@ -2396,12 +2492,14 @@ def functions_get_variables(name: str = None, address: str = None, port: int = N
 
 @mcp.tool()
 @text_output
-def functions_update_variable(variable_name: str, new_name: str = None, data_type: str = None,
+def functions_update_variable(variable_name: str = None, variable_id: str = None,
+                              new_name: str = None, data_type: str = None,
                               name: str = None, address: str = None, port: int = None) -> dict:
     """Rename or retype a function parameter/local variable.
 
     Args:
         variable_name: Existing parameter/local variable name to update
+        variable_id: Stable function variable identifier from functions_get_variables
         new_name: New variable name (optional)
         data_type: New data type name to apply (optional)
         name: Function name (mutually exclusive with address)
@@ -2411,12 +2509,12 @@ def functions_update_variable(variable_name: str, new_name: str = None, data_typ
     Returns:
         dict: Operation result with updated variable details
     """
-    if not variable_name or not (name or address):
+    if not (variable_name or variable_id) or not (name or address):
         return {
             "success": False,
             "error": {
                 "code": "MISSING_PARAMETER",
-                "message": "variable_name and either name or address are required"
+                "message": "Either variable_name or variable_id, and either name or address are required"
             },
             "timestamp": int(time.time() * 1000)
         }
@@ -2432,14 +2530,20 @@ def functions_update_variable(variable_name: str, new_name: str = None, data_typ
         }
 
     port = _get_instance_port(port)
-    endpoint = f"functions/{address}/variables/{quote(variable_name)}" if address else \
-        f"functions/by-name/{quote(name)}/variables/{quote(variable_name)}"
+    if variable_id:
+        endpoint = f"functions/{address}/variables/by-id/{quote(variable_id)}" if address else \
+            f"functions/by-name/{quote(name)}/variables/by-id/{quote(variable_id)}"
+    else:
+        endpoint = f"functions/{address}/variables/{quote(variable_name)}" if address else \
+            f"functions/by-name/{quote(name)}/variables/{quote(variable_name)}"
 
     payload = {}
     if new_name is not None:
         payload["name"] = new_name
     if data_type is not None:
         payload["data_type"] = data_type
+    if variable_id is not None:
+        payload["variable_id"] = variable_id
 
     response = safe_patch(port, endpoint, payload)
     return simplify_response(response)
@@ -2447,8 +2551,9 @@ def functions_update_variable(variable_name: str, new_name: str = None, data_typ
 
 @mcp.tool()
 @text_output
-def functions_apply_struct(variable_name: str,
-                           struct_name: str,
+def functions_apply_struct(variable_name: str = None,
+                           variable_id: str = None,
+                           struct_name: str = None,
                            as_pointer: bool = True,
                            new_name: str = None,
                            name: str = None,
@@ -2461,6 +2566,7 @@ def functions_apply_struct(variable_name: str,
 
     Args:
         variable_name: Existing parameter/local variable name to update
+        variable_id: Stable function variable identifier from functions_get_variables
         struct_name: Struct type name/path to apply
         as_pointer: Apply struct* when true, struct when false (default: True)
         new_name: Optional new variable name
@@ -2471,21 +2577,27 @@ def functions_apply_struct(variable_name: str,
     Returns:
         dict: Operation result with applied type details
     """
-    if not variable_name or not struct_name or not (name or address):
+    if not (variable_name or variable_id) or not struct_name or not (name or address):
         return {
             "success": False,
             "error": {
                 "code": "MISSING_PARAMETER",
-                "message": "variable_name, struct_name, and either name or address are required"
+                "message": "Either variable_name or variable_id, plus struct_name and either name or address are required"
             },
             "timestamp": int(time.time() * 1000)
         }
 
     port = _get_instance_port(port)
-    endpoint = f"functions/{address}/variables/{quote(variable_name)}/struct" if address else \
-        f"functions/by-name/{quote(name)}/variables/{quote(variable_name)}/struct"
-    fallback_endpoint = f"functions/{address}/variables/{quote(variable_name)}" if address else \
-        f"functions/by-name/{quote(name)}/variables/{quote(variable_name)}"
+    if variable_id:
+        endpoint = f"functions/{address}/variables/by-id/{quote(variable_id)}/struct" if address else \
+            f"functions/by-name/{quote(name)}/variables/by-id/{quote(variable_id)}/struct"
+        fallback_endpoint = f"functions/{address}/variables/by-id/{quote(variable_id)}" if address else \
+            f"functions/by-name/{quote(name)}/variables/by-id/{quote(variable_id)}"
+    else:
+        endpoint = f"functions/{address}/variables/{quote(variable_name)}/struct" if address else \
+            f"functions/by-name/{quote(name)}/variables/{quote(variable_name)}/struct"
+        fallback_endpoint = f"functions/{address}/variables/{quote(variable_name)}" if address else \
+            f"functions/by-name/{quote(name)}/variables/{quote(variable_name)}"
 
     payload = {
         "struct_name": struct_name,
@@ -2493,6 +2605,8 @@ def functions_apply_struct(variable_name: str,
     }
     if new_name is not None:
         payload["new_name"] = new_name
+    if variable_id is not None:
+        payload["variable_id"] = variable_id
 
     response = safe_patch(port, endpoint, payload)
 
@@ -2922,6 +3036,74 @@ def memory_map_add(name: str, address: str, size: int,
     response = safe_post(port, "memory/blocks", payload)
     return simplify_response(response)
 
+
+@mcp.tool()
+@text_output
+def ensure_memory_block(name: str, address: str, size: int,
+                        readable: bool = True, writable: bool = False,
+                        executable: bool = False, initialized: bool = False,
+                        port: int = None) -> dict:
+    """Create or update a named memory block mapping idempotently.
+
+    Args:
+        name: Mapping/block name
+        address: Start address in hex format
+        size: Mapping size in bytes
+        readable: Read permission (default: True)
+        writable: Write permission (default: False)
+        executable: Execute permission (default: False)
+        initialized: Create initialized block instead of uninitialized (default: False)
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Mapping information with action set to created, updated, or unchanged
+    """
+    if not name:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Name parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    if not address:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Address parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    if size is None or size <= 0:
+        return {
+            "success": False,
+            "error": {
+                "code": "INVALID_PARAMETER",
+                "message": "Size must be greater than 0"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+
+    payload = {
+        "name": name,
+        "address": address,
+        "size": str(size),
+        "readable": str(readable).lower(),
+        "writable": str(writable).lower(),
+        "executable": str(executable).lower(),
+        "initialized": str(initialized).lower(),
+        "mode": "create_or_update",
+    }
+
+    response = safe_post(port, "memory/blocks/ensure", payload)
+    return simplify_response(response)
+
 @mcp.tool()
 @text_output
 def memory_disassemble(address: str, limit: int = 50, offset: int = 0, port: int = None) -> dict:
@@ -3085,6 +3267,104 @@ def data_create(address: str, data_type: str, size: int = None, port: int = None
         payload["size"] = size
 
     response = safe_post(port, f"data/{address}", payload)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def ensure_data(address: str, data_type: str, label: str = None,
+                clear_conflicts: bool = True, size: int = None,
+                port: int = None) -> dict:
+    """Create or update typed data and an optional label in one operation.
+
+    Args:
+        address: Memory address in hex format
+        data_type: Data type name
+        label: Optional label to apply at the address
+        clear_conflicts: Clear conflicting data/instructions before creating data
+        size: Optional size in bytes for arrays or strings
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Ensured data information with action set to created, updated, or unchanged
+    """
+    if not address or not data_type:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Address and data_type parameters are required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+
+    payload = {
+        "address": address,
+        "type": data_type,
+        "clear_conflicts": str(clear_conflicts).lower(),
+    }
+    if label is not None:
+        payload["label"] = label
+    if size is not None:
+        payload["size"] = size
+
+    response = safe_post(port, "data/ensure", payload)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def get_capabilities(port: int = None) -> dict:
+    """Get the current server's supported sync and automation capabilities.
+
+    Args:
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Feature flags and supported batch operations
+    """
+    port = _get_instance_port(port)
+    response = safe_get(port, "capabilities")
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def run_batch(operations: List[dict], rollback_on_error: bool = True,
+              port: int = None) -> dict:
+    """Run multiple sync operations inside one Ghidra transaction.
+
+    Supported op values include: ensure_memory_block, ensure_data,
+    update_variable/functions_update_variable, and apply_struct/functions_apply_struct.
+
+    Args:
+        operations: List of operation dictionaries with an `op` key
+        rollback_on_error: Roll back the whole batch when any operation fails
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Per-operation results plus transaction rollback status
+    """
+    if not isinstance(operations, list) or not operations:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "operations must be a non-empty list"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+
+    payload = {
+        "ops": operations,
+        "rollback_on_error": rollback_on_error,
+    }
+
+    response = safe_post(port, "transactions/run-batch", payload)
     return simplify_response(response)
 
 @mcp.tool()
@@ -3700,7 +3980,15 @@ def project_list_files(folder: str = "/", recursive: bool = True,
     }
 
     response = safe_get(port, "project/files", params)
-    return simplify_response(response)
+    simplified = simplify_response(response)
+    result = simplified.get("result") if isinstance(simplified, dict) else None
+    if isinstance(result, dict) and isinstance(result.get("items"), list):
+        simplified["project"] = result.get("project")
+        simplified["folder"] = result.get("folder")
+        simplified["recursive"] = result.get("recursive")
+        simplified["result"] = result.get("items", [])
+        simplified.setdefault("size", len(simplified["result"]))
+    return simplified
 
 
 @mcp.tool()
