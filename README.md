@@ -235,6 +235,10 @@ GhydraMCP v2.2.0 organizes tools into logical namespaces for better discoverabil
 - `memory_map_add`: Create a named memory mapping/block (params: name, address, size, readable, writable, executable, initialized, port [optional])
 - `ensure_memory_block`: Create or update a named memory block idempotently (params: name, address, size, readable, writable, executable, initialized, port [optional])
 
+HTTP compatibility aliases are also available for integrators that need body-based route shapes:
+- `POST /memory/write`: Alias for writing memory with `address` in the JSON body.
+- `POST /memory/map`: Alias for creating a memory block with the same payload as `POST /memory/blocks`.
+
 **Automation & Sync**:
 - `get_capabilities`: Discover supported sync features and batch operations (params: port [optional])
 - `run_batch`: Execute multiple sync operations inside one Ghidra transaction with rollback on failure (params: operations, rollback_on_error, port [optional])

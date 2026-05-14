@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added SHA-256 checksum generation for release artifacts.
 - Added `segments_map` MCP bridge tool to produce an ordered memory segment map and optionally resolve an address to its containing segment.
 - Added support for creating named memory block mappings via `POST /memory/blocks` and MCP tool `memory_map_add` with configurable RWX permissions.
+- Added compatibility aliases `POST /memory/map` and `POST /memory/write` for integrators that need body-based memory mutation routes.
 - Added typed data region creation via `POST /data/region` and MCP tool `data_create_region`.
 - Extended data type application to support optional `size` with `PATCH /data/{address}`/`data_set_type` for array/string region sizing.
 
@@ -20,6 +21,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Fixed MCP bridge function name resolution path for `functions_get_callers` and `functions_get_callees` (and shared name-resolution users), preventing runtime errors like `'str' object has no attribute 'get'` when resolving by function name.
+- Fixed memory sync reliability by routing writes through EDT transaction handling for `PATCH /memory/{address}` and `PUT /memory/{address}`.
+- Fixed missing delete support by implementing `DELETE /memory/blocks/{identifier}` (identifier may be block start address or block name).
 
 ## [2.0.0] - 2025-11-11
 

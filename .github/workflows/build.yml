@@ -25,10 +25,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v3
-    
+
     - name: Set up JDK 21
       uses: actions/setup-java@v3
       with:
@@ -62,7 +62,7 @@ jobs:
 
     - name: Build release archives
       run: ./scripts/build_release.sh --label "${{ steps.release_meta.outputs.release_label }}"
-        
+
     - name: Upload nightly artifacts
       if: steps.release_meta.outputs.publish_release != 'true'
       uses: actions/upload-artifact@v4
@@ -72,14 +72,14 @@ jobs:
           target/GhydraMCP-*.zip
           target/GhydraMCP-*-SHA256SUMS.txt
           bridge_mcp_hydra.py
-    
+
     - name: Generate Release Notes from CHANGELOG
       if: steps.release_meta.outputs.publish_release == 'true'
       id: generate_notes
       run: |
         VERSION="${{ steps.release_meta.outputs.release_label }}"
         VERSION="${VERSION#v}"
-        
+
         awk -v version="$VERSION" '
           BEGIN { print_section=0; }
           $0 ~ "^## \\[" version "\\]" { print_section=1; next }
@@ -90,7 +90,7 @@ jobs:
         if [[ ! -s release_notes.md ]]; then
           printf 'Build artifacts for %s.\n\nSee CHANGELOG.md for the full release history.\n' "$VERSION" > release_notes.md
         fi
-        
+
         echo "RELEASE_NOTES_FILE=release_notes.md" >> $GITHUB_OUTPUT
 
     - name: Create Release

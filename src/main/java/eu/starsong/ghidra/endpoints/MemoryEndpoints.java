@@ -35,7 +35,7 @@ import javax.swing.SwingUtilities;
 public class MemoryEndpoints extends AbstractEndpoint {
 
     private static final int DEFAULT_MEMORY_LENGTH = 16;
-    private static final int MAX_MEMORY_LENGTH = 1048576;
+    private static final int MAX_MEMORY_LENGTH = 64 * 1024 * 1024; // 64 MB
     private static final String MEMORY_BLOCK_MODE_CREATE = "create";
     private static final String MEMORY_BLOCK_MODE_CREATE_OR_UPDATE = "create_or_update";
     private PluginTool tool;
@@ -97,6 +97,10 @@ public class MemoryEndpoints extends AbstractEndpoint {
             String path = exchange.getRequestURI().getPath();
             if (path.contains("/comments/")) {
                 handleMemoryAddressRequest(exchange);
+            } else if (path.equals("/memory/write") || path.equals("/memory/write/")) {
+                handleMemoryWriteAlias(exchange);
+            } else if (path.equals("/memory/map") || path.equals("/memory/map/")) {
+                handleMemoryBlocksRequest(exchange);
             } else if (path.equals("/memory/background-colors")) {
                 handleBackgroundColorsRequest(exchange);
             } else if (path.equals("/memory/blocks") || path.equals("/memory/blocks/") || path.startsWith("/memory/blocks/")) {
@@ -237,12 +241,10 @@ public class MemoryEndpoints extends AbstractEndpoint {
                     sendErrorResponse(exchange, 404, "Cannot read memory at address: " + e.getMessage(), "MEMORY_ACCESS_ERROR");
                 }
 
-            } else if ("PATCH".equals(method)) {
-                // Memory write operation
+            } else if ("PATCH".equals(method) || "PUT".equals(method)) {
                 Map<String, String> qparams = parseQueryParams(exchange);
                 String addressStr = qparams.get("address");
                 if (addressStr == null || addressStr.isEmpty()) {
-                    // Allow address extracted earlier via path handler attribute
                     Object addrAttr = exchange.getAttribute("address");
                     if (addrAttr != null) {
                         addressStr = addrAttr.toString();
@@ -253,127 +255,8 @@ public class MemoryEndpoints extends AbstractEndpoint {
                     return;
                 }
 
-                Program program = getCurrentProgram();
-                if (program == null) {
-                    sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
-                    return;
-                }
-
-                Address address;
-                try {
-                    address = program.getAddressFactory().getAddress(addressStr);
-                } catch (Exception e) {
-                    sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_ADDRESS");
-                    return;
-                }
-
-                // Parse JSON body
                 Map<String, String> payload = parseJsonPostParams(exchange);
-                String bytesData = payload.get("bytes");
-                String format = Optional.ofNullable(payload.get("format")).orElse("hex").toLowerCase();
-                boolean force = Boolean.parseBoolean(Optional.ofNullable(payload.get("force")).orElse("false"));
-                if (bytesData == null || bytesData.isEmpty()) {
-                    sendErrorResponse(exchange, 400, "'bytes' field required", "MISSING_PARAMETER");
-                    return;
-                }
-                if (!(format.equals("hex") || format.equals("base64") || format.equals("string"))) {
-                    sendErrorResponse(exchange, 400, "Invalid format (hex|base64|string)", "INVALID_PARAMETER");
-                    return;
-                }
-
-                byte[] decoded;
-                try {
-                    decoded = decodeBytes(bytesData, format);
-                } catch (IllegalArgumentException iae) {
-                    sendErrorResponse(exchange, 400, iae.getMessage(), "INVALID_PARAMETER");
-                    return;
-                }
-
-                if (decoded.length == 0) {
-                    sendErrorResponse(exchange, 400, "Decoded byte array empty", "INVALID_PARAMETER");
-                    return;
-                }
-                if (decoded.length > MAX_MEMORY_LENGTH) {
-                    sendErrorResponse(exchange, 400, "Write length exceeds max of " + MAX_MEMORY_LENGTH, "LIMIT_EXCEEDED");
-                    return;
-                }
-
-                Memory memory = program.getMemory();
-                if (!memory.contains(address)) {
-                    sendErrorResponse(exchange, 404, "Address not within any memory block", "MEMORY_ACCESS_ERROR");
-                    return;
-                }
-                ghidra.program.model.mem.MemoryBlock block = memory.getBlock(address);
-                if (block == null) {
-                    sendErrorResponse(exchange, 404, "No memory block for address", "MEMORY_BLOCK_NOT_FOUND");
-                    return;
-                }
-                if (!block.isWrite()) {
-                    sendErrorResponse(exchange, 403, "Memory block not writable: " + block.getName(), "MEMORY_BLOCK_NOT_WRITABLE");
-                    return;
-                }
-                // Prevent overflow outside block end
-                long remaining = block.getEnd().getOffset() - address.getOffset() + 1;
-                if (decoded.length > remaining) {
-                    sendErrorResponse(exchange, 400, "Write exceeds block boundary (remaining=" + remaining + ")", "WRITE_OUT_OF_RANGE");
-                    return;
-                }
-
-                // Perform write inside transaction
-                try {
-                    boolean success = TransactionHelper.executeInTransaction(program, force ? "Force Write Memory (clear code units)" : "Write Memory", () -> {
-                        if (force) {
-                            try {
-                                // Clear existing instructions/data in the target range to avoid conflicts
-                                Address end = address.add(decoded.length - 1);
-                                program.getListing().clearCodeUnits(address, end, false);
-                            } catch (Exception ce) {
-                                // Log but still attempt write; the write may still succeed
-                                Msg.warn(this, "Failed to clear code units before write: " + ce.getMessage());
-                            }
-                        }
-                        memory.setBytes(address, decoded);
-                        return true;
-                    });
-                    if (!success) {
-                        sendErrorResponse(exchange, 500, "Failed to write memory", "MEMORY_WRITE_FAILED");
-                        return;
-                    }
-                } catch (TransactionHelper.TransactionException tex) {
-                    Throwable cause = tex.getCause();
-                    String msg = tex.getMessage();
-                    if (cause != null && cause.getMessage() != null) {
-                        msg += ": " + cause.getMessage();
-                    }
-                    sendErrorResponse(exchange, 500, "Memory write transaction error: " + msg, "MEMORY_WRITE_FAILED");
-                    return;
-                } catch (Exception ex) {
-                    sendErrorResponse(exchange, 500, "Unexpected error writing memory: " + ex.getClass().getSimpleName() + ": " + ex.getMessage(), "MEMORY_WRITE_FAILED");
-                    return;
-                }
-
-                // Build response
-                ResponseBuilder builder = new ResponseBuilder(exchange, port)
-                        .success(true)
-                        .addLink("self", "/memory?address=" + address + "&length=" + decoded.length)
-                        .addLink("program", "/program")
-                        .addLink("blocks", "/memory/blocks");
-
-                // Add next/prev links like GET
-                builder.addLink("next", "/memory?address=" + address.add(decoded.length) + "&length=" + decoded.length);
-                if (address.getOffset() >= decoded.length) {
-                    builder.addLink("prev", "/memory?address=" + address.subtract(decoded.length) + "&length=" + decoded.length);
-                }
-
-                // Prepare result map
-                Map<String, Object> result = new HashMap<>();
-                result.put("address", address.toString());
-                result.put("bytesWritten", decoded.length);
-                result.put("format", format);
-                result.put("hexBytes", toHex(decoded));
-                result.put("rawBytes", Base64.getEncoder().encodeToString(decoded));
-                builder.result(result);
-                sendJsonResponse(exchange, builder.build(), 200);
+                writeMemory(exchange, addressStr, payload, "/memory/" + addressStr);
             } else {
                 sendErrorResponse(exchange, 405, "Method Not Allowed");
             }
@@ -470,6 +353,12 @@ private void handleMemoryAddressRequest(HttpExchange exchange) throws IOExceptio
 
         // Otherwise, treat as a direct memory request with address in the path
         String addressStr = remainingPath;
+        if ("PATCH".equals(exchange.getRequestMethod()) || "PUT".equals(exchange.getRequestMethod())) {
+            Map<String, String> payload = parseJsonPostParams(exchange);
+            writeMemory(exchange, addressStr, payload, "/memory/" + addressStr);
+            return;
+        }
+
         Map<String, String> params = parseQueryParams(exchange);
 
         // Handle same as the query parameter version
@@ -502,7 +391,13 @@ private void handleAddressBackgroundColor(HttpExchange exchange, String addressS
         try {
             address = program.getAddressFactory().getAddress(addressStr);
         } catch (Exception e) {
-            sendErrorResponse(exchange, 400, "Invalid address format: " + addressStr, "INVALID_ADDRESS");
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("address", addressStr);
+            details.put("required_action", "use a valid program address");
+            sendDetailedErrorResponse(exchange, 400,
+                "Invalid address format: " + addressStr,
+                "INVALID_ADDRESS",
+                details);
             return;
         }
 
@@ -1204,8 +1099,9 @@ private void handleDisassemblyAtAddress(HttpExchange exchange, String addressStr
 
             } else if ("POST".equals(exchange.getRequestMethod())) {
                 String path = exchange.getRequestURI().getPath();
+                boolean mapAliasPath = "/memory/map".equals(path) || "/memory/map/".equals(path);
                 boolean ensurePath = "/memory/blocks/ensure".equals(path) || "/memory/blocks/ensure/".equals(path);
-                if (!ensurePath && !"/memory/blocks".equals(path) && !"/memory/blocks/".equals(path)) {
+                if (!mapAliasPath && !ensurePath && !"/memory/blocks".equals(path) && !"/memory/blocks/".equals(path)) {
                     sendErrorResponse(exchange, 404, "Memory block resource not found: " + path, "RESOURCE_NOT_FOUND");
                     return;
                 }
@@ -1284,15 +1180,93 @@ private void handleDisassemblyAtAddress(HttpExchange exchange, String addressStr
                 result.put("updated", "updated".equals(action));
                 result.put("unchanged", "unchanged".equals(action));
 
+                String selfPath = mapAliasPath ? "/memory/map" :
+                    (ensureMode ? "/memory/blocks/ensure" : "/memory/blocks");
+
                 ResponseBuilder builder = new ResponseBuilder(exchange, port)
                     .success(true)
                     .result(result)
-                    .addLink("self", ensureMode ? "/memory/blocks/ensure" : "/memory/blocks")
+                    .addLink("self", selfPath)
                     .addLink("memory", "/memory")
                     .addLink("segments", "/segments");
 
                 int statusCode = "created".equals(action) ? 201 : 200;
                 sendJsonResponse(exchange, builder.build(), statusCode);
+
+            } else if ("DELETE".equals(exchange.getRequestMethod())) {
+                String path = exchange.getRequestURI().getPath();
+                if (!path.startsWith("/memory/blocks/")) {
+                    sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+                    return;
+                }
+
+                String identifier = path.substring("/memory/blocks/".length());
+                if (identifier.endsWith("/")) {
+                    identifier = identifier.substring(0, identifier.length() - 1);
+                }
+                if (identifier.isBlank()) {
+                    sendErrorResponse(exchange, 400, "Block identifier is required", "MISSING_PARAMETER");
+                    return;
+                }
+
+                Program program = getCurrentProgram();
+                if (program == null) {
+                    sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+                    return;
+                }
+
+                Memory memory = program.getMemory();
+                MemoryBlock targetBlock = null;
+
+                try {
+                    Address byAddress = program.getAddressFactory().getAddress(identifier);
+                    if (byAddress != null) {
+                        targetBlock = memory.getBlock(byAddress);
+                    }
+                } catch (Exception ignored) {
+                    // Fall back to resolving by block name.
+                }
+
+                if (targetBlock == null) {
+                    targetBlock = memory.getBlock(identifier);
+                }
+
+                if (targetBlock == null) {
+                    sendErrorResponse(exchange, 404, "Memory block not found: " + identifier, "MEMORY_BLOCK_NOT_FOUND");
+                    return;
+                }
+
+                final String deletedName = targetBlock.getName();
+                final String deletedStart = targetBlock.getStart().toString();
+                final String deletedEnd = targetBlock.getEnd().toString();
+                final long deletedSize = targetBlock.getSize();
+
+                try {
+                    final MemoryBlock blockToDelete = targetBlock;
+                    TransactionHelper.executeInTransaction(program, "Delete Memory Block", () -> {
+                        removeBlock(memory, blockToDelete);
+                        return true;
+                    });
+                } catch (Exception e) {
+                    sendMemoryBlockMutationError(exchange, e instanceof Exception ? (Exception) e : new Exception(e));
+                    return;
+                }
+
+                Map<String, Object> result = new HashMap<>();
+                result.put("deleted", true);
+                result.put("name", deletedName);
+                result.put("start", deletedStart);
+                result.put("end", deletedEnd);
+                result.put("size", deletedSize);
+
+                ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                    .success(true)
+                    .result(result)
+                    .addLink("self", "/memory/blocks/" + identifier)
+                    .addLink("blocks", "/memory/blocks")
+                    .addLink("memory", "/memory");
+
+                sendJsonResponse(exchange, builder.build(), 200);
 
             } else {
                 sendErrorResponse(exchange, 405, "Method Not Allowed");
@@ -1301,6 +1275,286 @@ private void handleDisassemblyAtAddress(HttpExchange exchange, String addressStr
             Msg.error(this, "Error in /memory/blocks endpoint", e);
             sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage());
         }
+    }
+
+    private void handleMemoryWriteAlias(HttpExchange exchange) throws IOException {
+        try {
+            String method = exchange.getRequestMethod();
+            if (!"POST".equals(method) && !"PATCH".equals(method) && !"PUT".equals(method)) {
+                sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+                return;
+            }
+
+            Map<String, String> payload = parseJsonPostParams(exchange);
+            String addressStr = Optional.ofNullable(payload.get("address")).orElse(payload.get("start"));
+            if (addressStr == null || addressStr.isBlank()) {
+                sendErrorResponse(exchange, 400, "'address' field required", "MISSING_PARAMETER");
+                return;
+            }
+
+            writeMemory(exchange, addressStr, payload, "/memory/write");
+        } catch (Exception e) {
+            Msg.error(this, "Error in /memory/write endpoint", e);
+            sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR");
+        }
+    }
+
+    private void writeMemory(HttpExchange exchange,
+                             String addressStr,
+                             Map<String, String> payload,
+                             String selfPath) throws IOException {
+        Program program = getCurrentProgram();
+        if (program == null) {
+            sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+            return;
+        }
+
+        Address address;
+        try {
+            address = program.getAddressFactory().getAddress(addressStr);
+        } catch (Exception e) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("address", addressStr);
+            details.put("required_action", "use a valid program address");
+            sendDetailedErrorResponse(exchange, 400,
+                "Invalid address format: " + addressStr,
+                "INVALID_ADDRESS",
+                details);
+            return;
+        }
+
+        String bytesStr = Optional.ofNullable(payload.get("bytes")).orElse(payload.get("bytes_data"));
+        String inputFormat = payload.getOrDefault("format", "hex").toLowerCase(Locale.ROOT);
+        boolean force = Boolean.parseBoolean(Optional.ofNullable(payload.get("force")).orElse("false"));
+
+        if (bytesStr == null || bytesStr.isEmpty()) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("required_parameter", "bytes or bytes_data");
+            sendDetailedErrorResponse(exchange, 400,
+                "Missing bytes parameter",
+                "MISSING_PARAMETER",
+                details);
+            return;
+        }
+
+        if (!inputFormat.equals("hex") && !inputFormat.equals("base64") && !inputFormat.equals("string")) {
+            sendErrorResponse(exchange, 400, "Invalid format parameter (must be 'hex', 'base64', or 'string')", "INVALID_PARAMETER");
+            return;
+        }
+
+        byte[] bytes;
+        try {
+            bytes = decodeBytes(bytesStr, inputFormat);
+        } catch (Exception e) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("format", inputFormat);
+            details.put("required_action", "ensure payload encoding matches 'format'");
+            details.put("cause", Optional.ofNullable(e.getMessage()).orElse("unknown"));
+            sendDetailedErrorResponse(exchange, 400,
+                "Invalid bytes format: " + e.getMessage(),
+                "INVALID_PARAMETER",
+                details);
+            return;
+        }
+
+        if (bytes.length == 0) {
+            sendErrorResponse(exchange, 400, "Decoded byte array empty", "INVALID_PARAMETER");
+            return;
+        }
+        if (bytes.length > MAX_MEMORY_LENGTH) {
+            sendErrorResponse(exchange, 400, "Write length exceeds max of " + MAX_MEMORY_LENGTH, "LIMIT_EXCEEDED");
+            return;
+        }
+
+        Memory memory = program.getMemory();
+        if (!memory.contains(address)) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("address", address.toString());
+            details.put("required_action", "create/ensure a memory block at this address first");
+            sendDetailedErrorResponse(exchange, 404,
+                "Address not within any memory block",
+                "MEMORY_ACCESS_ERROR",
+                details);
+            return;
+        }
+
+        MemoryBlock block = memory.getBlock(address);
+        if (block == null) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("address", address.toString());
+            details.put("required_action", "create/ensure a memory block first");
+            sendDetailedErrorResponse(exchange, 404,
+                "No memory block for address",
+                "MEMORY_BLOCK_NOT_FOUND",
+                details);
+            return;
+        }
+        // For a loader-like API, allow writes to non-writable blocks by
+        // temporarily making them writable, performing the write, and restoring permissions.
+        // This is necessary because we may be mapping segments with no write permissions
+        // but still need to write data like a loader would do.
+        final boolean wasNotWritable = !block.isWrite();
+        final boolean originalWrite = block.isWrite();
+        final boolean originalRead = block.isRead();
+        final boolean originalExecute = block.isExecute();
+
+        // Uninitialized blocks have no byte storage — setBytes() will throw.
+        // Auto-convert to an initialized block filled with 0x00 so the write can proceed.
+        // Use reflection to call memory.convertToInitialized() so the compiler does not need
+        // ghidra.framework.store.LockException on the classpath (it is not bundled in lib/).
+        if (!block.isInitialized()) {
+            final MemoryBlock blockRef = block;
+            try {
+                TransactionHelper.executeInTransaction(program,
+                    "Initialize Memory Block: " + block.getName(),
+                    () -> {
+                        try {
+                            Method m = memory.getClass().getMethod("convertToInitialized",
+                                MemoryBlock.class, byte.class);
+                            m.invoke(memory, blockRef, (byte) 0x00);
+                        } catch (InvocationTargetException ite) {
+                            Throwable cause = ite.getCause();
+                            throw new Exception("convertToInitialized failed: " +
+                                (cause != null ? cause.getMessage() : ite.getMessage()), cause != null ? cause : ite);
+                        }
+                        return true;
+                    });
+                // Re-fetch after conversion (block object may be stale).
+                block = memory.getBlock(address);
+                if (block == null) {
+                    sendErrorResponse(exchange, 500,
+                        "Memory block lost after initialization", "MEMORY_WRITE_FAILED");
+                    return;
+                }
+            } catch (Exception e) {
+                Map<String, Object> details = new LinkedHashMap<>();
+                details.put("block_name", blockRef.getName());
+                details.put("cause", Optional.ofNullable(e.getMessage()).orElse("unknown"));
+                details.put("required_action", "recreate block with initialized=true");
+                sendDetailedErrorResponse(exchange, 500,
+                    "Failed to initialize memory block: " + e.getMessage(),
+                    "BLOCK_INIT_FAILED",
+                    details);
+                return;
+            }
+        }
+
+        long remaining = block.getEnd().getOffset() - address.getOffset() + 1;
+        if (bytes.length > remaining) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("block_name", block.getName());
+            details.put("block_start", block.getStart().toString());
+            details.put("block_end", block.getEnd().toString());
+            details.put("block_size", block.getSize());
+            details.put("address", address.toString());
+            details.put("requested_bytes", bytes.length);
+            details.put("remaining_bytes", remaining);
+            details.put("required_action", "ensure block size/range matches the region before writing");
+            sendDetailedErrorResponse(exchange, 400,
+                "Write exceeds block boundary (remaining=" + remaining + ")",
+                "WRITE_OUT_OF_RANGE",
+                details);
+            return;
+        }
+
+        boolean autoClearedCodeUnits = false;
+        boolean autoMadeWritable = false;
+        try {
+            performWriteInTransaction(program, memory, address, bytes, force, block, wasNotWritable);
+            autoMadeWritable = wasNotWritable;
+        } catch (Exception e) {
+            if (!force) {
+                try {
+                    // Auto-retry with cleared code units to handle listing/code-unit conflicts.
+                    performWriteInTransaction(program, memory, address, bytes, true, block, wasNotWritable);
+                    autoClearedCodeUnits = true;
+                    autoMadeWritable = wasNotWritable;
+                } catch (Exception retryError) {
+                    Map<String, Object> details = new LinkedHashMap<>();
+                    details.put("address", address.toString());
+                    details.put("block_name", block.getName());
+                    details.put("bytes", bytes.length);
+                    details.put("format", inputFormat);
+                    details.put("cause", Optional.ofNullable(retryError.getMessage()).orElse("unknown"));
+                    details.put("required_action", "retry with force=true and verify block range/permissions");
+                    sendDetailedErrorResponse(exchange, 500,
+                        "Memory write transaction error: " + retryError.getMessage(),
+                        "MEMORY_WRITE_FAILED",
+                        details);
+                    return;
+                }
+            } else {
+                Map<String, Object> details = new LinkedHashMap<>();
+                details.put("address", address.toString());
+                details.put("block_name", block.getName());
+                details.put("bytes", bytes.length);
+                details.put("format", inputFormat);
+                details.put("cause", Optional.ofNullable(e.getMessage()).orElse("unknown"));
+                details.put("required_action", "verify block range/permissions and active transactions in Ghidra");
+                sendDetailedErrorResponse(exchange, 500,
+                    "Memory write transaction error: " + e.getMessage(),
+                    "MEMORY_WRITE_FAILED",
+                    details);
+                return;
+            }
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("address", addressStr);
+        result.put("length", bytes.length);
+        result.put("bytesWritten", bytes.length);
+        result.put("format", inputFormat);
+        result.put("force", force || autoClearedCodeUnits);
+        result.put("autoClearedCodeUnits", autoClearedCodeUnits);
+        result.put("autoMadeWritable", autoMadeWritable);
+        result.put("hexBytes", toHex(bytes));
+        result.put("rawBytes", Base64.getEncoder().encodeToString(bytes));
+
+        ResponseBuilder builder = new ResponseBuilder(exchange, port)
+            .success(true)
+            .result(result)
+            .addLink("self", selfPath)
+            .addLink("memory", "/memory/" + addressStr);
+
+        sendJsonResponse(exchange, builder.build(), 200);
+    }
+
+    private void performWriteInTransaction(Program program,
+                                           Memory memory,
+                                           Address address,
+                                           byte[] bytes,
+                                           boolean clearCodeUnits,
+                                           MemoryBlock block,
+                                           boolean wasNotWritable) throws Exception {
+        TransactionHelper.executeInTransaction(program,
+            clearCodeUnits ? "Force Write Memory (clear code units)" : "Write Memory",
+            () -> {
+                // Temporarily make the block writable if it wasn't already
+                if (wasNotWritable) {
+                    try {
+                        Method m = block.getClass().getMethod("setPermissions", boolean.class, boolean.class, boolean.class);
+                        m.invoke(block, block.isRead(), true, block.isExecute());
+                    } catch (Exception e) {
+                        throw new Exception("Failed to make block writable: " + e.getMessage(), e);
+                    }
+                }
+                if (clearCodeUnits) {
+                    Address end = address.addNoWrap(bytes.length - 1);
+                    program.getListing().clearCodeUnits(address, end, false);
+                }
+                memory.setBytes(address, bytes);
+                // Restore original permissions after write
+                if (wasNotWritable) {
+                    try {
+                        Method m = block.getClass().getMethod("setPermissions", boolean.class, boolean.class, boolean.class);
+                        m.invoke(block, block.isRead(), false, block.isExecute());
+                    } catch (Exception e) {
+                        // Log but don't fail the write if restore fails
+                        Msg.error(MemoryEndpoints.class, "Failed to restore block permissions: " + e.getMessage());
+                    }
+                }
+                return true;
+            });
     }
 
     private MemoryBlockRequest parseMemoryBlockRequest(HttpExchange exchange,

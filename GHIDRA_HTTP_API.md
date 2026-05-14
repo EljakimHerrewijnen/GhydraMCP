@@ -1328,6 +1328,21 @@ Provides raw memory access.
   }
   ```
 - **`PATCH /memory/{address}`**: Write bytes to memory. Requires `bytes` (in specified `format`) and `format` in the payload. Use with extreme caution.
+- **`PUT /memory/{address}`**: Alternative write method with the same request/response shape as `PATCH /memory/{address}`.
+
+- **`POST /memory/write`** (also accepts **`PUT`** and **`PATCH`**): Compatibility alias for memory writes when the caller sends the address in the request body instead of the path.
+  - Request Payload:
+    - `address` (required): Target memory address.
+    - `bytes` or `bytes_data` (required): Bytes to write.
+    - `format` (optional, default `hex`): One of `hex`, `base64`, or `string`.
+  ```json
+  // Example Request
+  {
+    "address": "0x00401000",
+    "bytes": "90909090",
+    "format": "hex"
+  }
+  ```
 
 - **`GET /memory/blocks`**: List memory blocks with address ranges and permission flags.
 - **`POST /memory/blocks`**: Create a new named memory block mapping.
@@ -1368,6 +1383,22 @@ Provides raw memory access.
       "self": { "href": "/memory/blocks" },
       "memory": { "href": "/memory" },
       "segments": { "href": "/segments" }
+    }
+  }
+  ```
+
+- **`POST /memory/map`**: Compatibility alias for `POST /memory/blocks` with the same request and response shape.
+- **`DELETE /memory/blocks/{identifier}`**: Delete a memory block by start address (e.g. `0x41392000`) or by block name.
+  ```json
+  // Example Response
+  {
+    "success": true,
+    "result": {
+      "deleted": true,
+      "name": "test_block",
+      "start": "41392000",
+      "end": "413923ff",
+      "size": 1024
     }
   }
   ```

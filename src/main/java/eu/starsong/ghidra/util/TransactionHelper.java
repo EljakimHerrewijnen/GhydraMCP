@@ -45,9 +45,16 @@ public class TransactionHelper {
                 Msg.error(TransactionHelper.class, "Transaction failed: " + transactionName, e);
             } finally {
                 if (txId >= 0) {
-                    if (!program.endTransaction(txId, success)) {
-                        Msg.error(TransactionHelper.class, "Failed to end transaction: " + transactionName);
-                        exception.set(new TransactionException("Failed to end transaction: " + transactionName));
+                    // endTransaction returns true only when commit=true AND successfully committed.
+                    // When success=false we explicitly request rollback, so it always returns false
+                    // — that is expected and must NOT overwrite the original exception.
+                    boolean committed = program.endTransaction(txId, success);
+                    if (success && !committed) {
+                        // We tried to commit but the transaction was rolled back by Ghidra.
+                        Msg.error(TransactionHelper.class, "Failed to commit transaction: " + transactionName);
+                        if (exception.get() == null) {
+                            exception.set(new TransactionException("Failed to commit transaction: " + transactionName));
+                        }
                     }
                 }
             }
