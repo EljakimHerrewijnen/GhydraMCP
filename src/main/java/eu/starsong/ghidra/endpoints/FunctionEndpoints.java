@@ -34,6 +34,10 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.Set;
+import java.util.HashSet;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -376,6 +380,8 @@ public class FunctionEndpoints extends AbstractEndpoint {
             handleDisassembleFunction(exchange, function);
         } else if (resource.equals("variables")) {
             handleFunctionVariables(exchange, function);
+        } else if (resource.equals("dossier")) {
+            handleFunctionDossier(exchange, function);
         } else {
             sendErrorResponse(exchange, 404, "Function resource not found: " + resource, "RESOURCE_NOT_FOUND");
         }
@@ -840,6 +846,8 @@ public class FunctionEndpoints extends AbstractEndpoint {
             handleDisassembleFunction(exchange, function);
         } else if (resource.equals("variables")) {
             handleFunctionVariables(exchange, function);
+        } else if (resource.equals("dossier")) {
+            handleFunctionDossier(exchange, function);
         } else if (resource.equals("comments")) {
             handleFunctionComments(exchange, function);
         } else if (resource.equals("callers")) {
@@ -848,6 +856,10 @@ public class FunctionEndpoints extends AbstractEndpoint {
             handleFunctionCallees(exchange, function);
         } else if (resource.equals("hash")) {
             handleFunctionHash(exchange, function);
+        } else if (resource.equals("dossier")) {
+            handleFunctionDossier(exchange, function);
+        } else if (resource.equals("dossier")) {
+            handleFunctionDossier(exchange, function);
         } else if (resource.startsWith("variables/by-id/")) {
             String variablePath = resource.substring("variables/by-id/".length());
             String variableId = variablePath;
@@ -2126,4 +2138,161 @@ public class FunctionEndpoints extends AbstractEndpoint {
 
         return builder.build();
     }
+
+    private void handleFunctionDossier(HttpExchange exchange, Function function) throws IOException {
+        try {
+            if (!"GET".equals(exchange.getRequestMethod())) {
+                sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+                return;
+            }
+
+            Map<String, String> params = parseQueryParams(exchange);
+            int maxDepth = parseIntOrDefault(params.get("depth"), 1);
+
+            Program program = getCurrentProgram();
+            if (program == null) {
+                sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+                return;
+            }
+
+            Map<String, Object> dossier = new LinkedHashMap<>();
+            dossier.put("name", function.getName());
+            dossier.put("address", function.getEntryPoint().toString());
+            dossier.put("signature", function.getPrototypeString(true, true));
+            
+            // Get decompilation
+            DecompilerCache cache = getDecompilerCache();
+            String decompiledCode = null;
+            if (cache != null) {
+                decompiledCode = cache.getDecompiledCode(function, 30);
+            }
+            if (decompiledCode == null || decompiledCode.isEmpty()) {
+                decompiledCode = GhidraUtil.decompileFunction(function, true, 30);
+            }
+            dossier.put("decompiled_code", decompiledCode != null ? decompiledCode : "// Decompilation failed");
+
+            // Extract strings & globals referenced from the function body
+            List<Map<String, Object>> strings = new ArrayList<>();
+            List<Map<String, Object>> globals = new ArrayList<>();
+            ghidra.program.model.listing.InstructionIterator instructionIterator = program.getListing().getInstructions(function.getBody(), true);
+            Set<String> seenRefs = new HashSet<>();
+            
+            while (instructionIterator.hasNext()) {
+                ghidra.program.model.listing.Instruction instr = instructionIterator.next();
+                for (ghidra.program.model.symbol.Reference ref : instr.getReferencesFrom()) {
+                    if (ref.getReferenceType().isData() && seenRefs.add(ref.getToAddress().toString())) {
+                        ghidra.program.model.listing.Data data = program.getListing().getDataAt(ref.getToAddress());
+                        if (data != null) {
+                            String dataTypeName = data.getDataType().getName().toLowerCase();
+                            boolean isString = dataTypeName.contains("string") || dataTypeName.contains("unicode") || (dataTypeName.contains("char") && data.getLength() > 1);
+                            
+                            Map<String, Object> refInfo = new HashMap<>();
+                            refInfo.put("address", data.getAddress().toString());
+                            refInfo.put("type", data.getDataType().getName());
+                            refInfo.put("instruction_addr", instr.getAddress().toString());
+                            
+                            if (isString) {
+                                String val = data.getDefaultValueRepresentation();
+                                refInfo.put("value", val != null ? val : "");
+                                strings.add(refInfo);
+                            } else {
+                                globals.add(refInfo);
+                            }
+                        }
+                    }
+                }
+            }
+            dossier.put("referenced_strings", strings);
+            dossier.put("referenced_globals", globals);
+
+            // Collect neighbors recursively
+            List<Map<String, Object>> neighbors = new ArrayList<>();
+            Set<String> processedNodes = new HashSet<>();
+            processedNodes.add(function.getEntryPoint().toString()); // Add root
+            collectNeighborsRecursive(program, function, 1, maxDepth, processedNodes, neighbors, cache);
+            dossier.put("neighbors", neighbors);
+
+            ResponseBuilder builder = new ResponseBuilder(exchange, port).success(true).result(dossier);
+            
+            builder.addLink("self", "/functions/" + function.getEntryPoint() + "/dossier?depth=" + maxDepth);
+            builder.addLink("program", "/program");
+            
+            sendJsonResponse(exchange, builder.build(), 200);
+        } catch (Exception e) {
+            Msg.error(this, "Error returning function dossier", e);
+            sendErrorResponse(exchange, 500, "Internal Server Error: " + e.getMessage(), "INTERNAL_ERROR");
+        }
+    }
+
+    private void collectNeighborsRecursive(Program program, Function currentFunction, int currentDepth, int maxDepth, Set<String> processedNodes, List<Map<String, Object>> neighbors, DecompilerCache cache) {
+        if (currentDepth > maxDepth) {
+            return;
+        }
+
+        // Gather Callers
+        for (ghidra.program.model.symbol.Reference ref : program.getReferenceManager().getReferencesTo(currentFunction.getEntryPoint())) {
+            if (!ref.getReferenceType().isCall()) continue;
+            Function caller = program.getFunctionManager().getFunctionContaining(ref.getFromAddress());
+            if (caller == null) continue;
+            
+            String callerAddr = caller.getEntryPoint().toString();
+            if (processedNodes.add(callerAddr)) {
+                Map<String, Object> node = buildNeighborNode(caller, ref.getFromAddress().toString(), "caller", currentDepth, cache);
+                neighbors.add(node);
+                collectNeighborsRecursive(program, caller, currentDepth + 1, maxDepth, processedNodes, neighbors, cache);
+            }
+        }
+
+        // Gather Callees
+        ghidra.program.model.listing.InstructionIterator instructionIterator = program.getListing().getInstructions(currentFunction.getBody(), true);
+        while (instructionIterator.hasNext()) {
+            ghidra.program.model.listing.Instruction instr = instructionIterator.next();
+            for (ghidra.program.model.symbol.Reference ref : instr.getReferencesFrom()) {
+                if (!ref.getReferenceType().isCall()) continue;
+                Function callee = program.getFunctionManager().getFunctionAt(ref.getToAddress());
+                if (callee == null) {
+                    callee = program.getFunctionManager().getFunctionContaining(ref.getToAddress());
+                }
+                if (callee == null) continue;
+
+                String calleeAddr = callee.getEntryPoint().toString();
+                if (processedNodes.add(calleeAddr)) {
+                    Map<String, Object> node = buildNeighborNode(callee, instr.getAddress().toString(), "callee", currentDepth, cache);
+                    neighbors.add(node);
+                    collectNeighborsRecursive(program, callee, currentDepth + 1, maxDepth, processedNodes, neighbors, cache);
+                }
+            }
+        }
+    }
+
+    private Map<String, Object> buildNeighborNode(Function function, String callSite, String relation, int depth, DecompilerCache cache) {
+        Map<String, Object> node = new LinkedHashMap<>();
+        node.put("relation", relation);
+        node.put("depth", depth);
+        node.put("call_site", callSite);
+        node.put("name", function.getName());
+        node.put("address", function.getEntryPoint().toString());
+        
+        try {
+            node.put("signature", function.getPrototypeString(true, true));
+        } catch (Exception e) {
+            node.put("signature", "");
+        }
+
+        String decompiledCode = null;
+        try {
+            if (cache != null) {
+                decompiledCode = cache.getDecompiledCode(function, 30);
+            }
+            if (decompiledCode == null || decompiledCode.isEmpty()) {
+                decompiledCode = GhidraUtil.decompileFunction(function, true, 30);
+            }
+        } catch(Exception e) {
+            // ignore decomp failures on neighbors
+        }
+        node.put("decompiled_code", decompiledCode != null ? decompiledCode : "// Decompilation failed");
+        
+        return node;
+    }
+
 }

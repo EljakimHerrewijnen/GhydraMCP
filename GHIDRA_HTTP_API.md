@@ -1650,6 +1650,62 @@ Provides automation-oriented endpoints for capability discovery and grouped tran
   }
   ```
 
+
+
+### 12. LLM Dossiers (v2.2+)
+
+Aggregated endpoints designed exclusively to hand an LLM the complete "neighborhood" context in a single request, reducing the need for iterative API calls.
+
+- **`GET /functions/{address}/dossier`**: Provides the function's own decompilation, the decompiled bodies of its callers and callees up to `depth`, and statically referenced strings/globals.
+  - Query Parameters:
+    - `?depth=[int]`: Walk depth for callers/callees (default: 1). Note that higher values exponentially increase payload size.
+  ```json
+  // Example Response Fragment
+  "result": {
+    "name": "check_license",
+    "address": "0x4010a0",
+    "signature": "int check_license(void)",
+    "decompiled_code": "int check_license(void) { ... }",
+    "referenced_strings": [
+      { "address": "0x405000", "type": "string", "value": "License OK" }
+    ],
+    "referenced_globals": [
+      { "address": "0x408000", "type": "int" }
+    ],
+    "neighbors": [
+      {
+         "relation": "caller",
+         "depth": 1,
+         "call_site": "0x400500",
+         "name": "main",
+         "address": "0x400000",
+         "signature": "int main(void)",
+         "decompiled_code": "int main(void) { ... }"
+      }
+    ]
+  }
+  ```
+
+- **`GET /data/{address}/dossier`**: Provides information about a data element (struct instance, global variable, string) along with decompilation of functions that reference it.
+  ```json
+  // Example Response Fragment
+  "result": {
+    "address": "0x408000",
+    "type": "undefined4",
+    "length": 4,
+    "value": "0",
+    "name": "g_status",
+    "xrefs": [
+      {
+         "from_address": "0x4010a3",
+         "type": "WRITE",
+         "function_name": "check_license",
+         "decompiled_code": "int check_license(void) { ... g_status = 1; }"
+      }
+    ]
+  }
+  ```
+
 ## Design Considerations for AI Usage
 
 - **Structured responses**: JSON format ensures predictable parsing by AI agents.

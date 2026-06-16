@@ -888,6 +888,14 @@ def format_batch_result(response: dict, **kwargs) -> str:
     return "\n".join(lines)
 
 
+
+def format_dossier(response: dict, **kwargs) -> str:
+    """Format dossier response as text (by returning raw JSON of the result)"""
+    if not response.get("success", False):
+        return format_error(response)
+    import json
+    return json.dumps(response.get("result", {}), indent=2)
+
 def format_simple_result(response: dict, success_msg: str = "Done", **kwargs) -> str:
     """Format a simple success/error response"""
     if not response.get("success", False):
@@ -1079,6 +1087,8 @@ FORMATTERS = {
     "project_info": format_project_info,
     "project_list_files": format_project_files,
     "get_capabilities": format_capabilities,
+    "functions_dossier": format_dossier,
+    "data_dossier": format_dossier,
     "run_batch": format_batch_result,
     "classes_list": format_classes_list,
     "symbols_list": format_symbols_list,
@@ -2348,6 +2358,68 @@ def functions_disassemble(name: str = None, address: str = None, offset: int = 0
         params["limit"] = limit
 
     response = safe_get(port, endpoint, params)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def functions_dossier(name: str = None, address: str = None, depth: int = 1, port: int = None) -> dict:
+    """Get an aggregated dossier of a function, including neighborhood decompilation up to a given depth.
+
+    Args:
+        name: Function name (mutually exclusive with address)
+        address: Function address in hex format (mutually exclusive with name)
+        depth: Graph depth for neighborhood collection (callers and callees). Default 1.
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Dossier including function info, referenced strings, referenced globals,
+              and decompiled code for the function and its neighbors up to max_depth.
+    """
+    if not name and not address:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Either name or address parameter is required"
+            }
+        }
+
+    port = _get_instance_port(port)
+
+    if address:
+        endpoint = f"functions/{address}/dossier"
+    else:
+        endpoint = f"functions/by-name/{quote(name)}/dossier"
+
+    response = safe_get(port, endpoint, {"depth": depth})
+    return simplify_response(response)
+
+@mcp.tool()
+@text_output
+def data_dossier(address: str, port: int = None) -> dict:
+    """Get an aggregated dossier of a data location, including referencing function's decompilation.
+
+    Args:
+        address: Data address in hex format 
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Dossier including data info, value, symbols, and xrefs with neighboring decompiled code.
+    """
+    if not address:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "address parameter is required"
+            }
+        }
+
+    port = _get_instance_port(port)
+    endpoint = f"data/{address}/dossier"
+
+    response = safe_get(port, endpoint)
     return simplify_response(response)
 
 @mcp.tool()

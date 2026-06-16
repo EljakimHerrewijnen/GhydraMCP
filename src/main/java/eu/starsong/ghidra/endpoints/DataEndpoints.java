@@ -234,11 +234,15 @@ package eu.starsong.ghidra.endpoints;
                     addressStr = java.net.URLDecoder.decode(addressStr, java.nio.charset.StandardCharsets.UTF_8);
 
                     if ("GET".equals(method)) {
-                        // GET /data/{address} - list filtered by address
-                        Map<String, String> qparams = parseQueryParams(exchange);
-                        qparams.put("addr", addressStr);
-                        // Reuse the list handler by setting the filter
-                        handleListData(exchange);
+                        if ("dossier".equals(subResource)) {
+                            handleDataDossier(exchange, addressStr);
+                        } else {
+                            // GET /data/{address} - list filtered by address
+                            Map<String, String> qparams = parseQueryParams(exchange);
+                            qparams.put("addr", addressStr);
+                            // Reuse the list handler by setting the filter
+                            handleListData(exchange);
+                        }
                     } else if ("POST".equals(method)) {
                         // POST /data/{address} - create data at address
                         Map<String, String> params = parseJsonPostParams(exchange);
@@ -1458,4 +1462,88 @@ package eu.starsong.ghidra.endpoints;
                 sendErrorResponse(exchange, 500, "Error listing strings: " + e.getMessage(), "INTERNAL_ERROR");
             }
         }
-    }
+    
+        private void handleDataDossier(HttpExchange exchange, String addressStr) throws IOException {
+            try {
+                if (!"GET".equals(exchange.getRequestMethod())) {
+                    sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+                    return;
+                }
+
+                Program program = getCurrentProgram();
+                if (program == null) {
+                    sendErrorResponse(exchange, 400, "No program loaded", "NO_PROGRAM_LOADED");
+                    return;
+                }
+
+                Address addr;
+                try {
+                    addr = program.getAddressFactory().getAddress(addressStr);
+                } catch (Exception e) {
+                    sendErrorResponse(exchange, 400, "Invalid address format", "INVALID_ADDRESS");
+                    return;
+                }
+
+                Data data = program.getListing().getDataAt(addr);
+                Map<String, Object> dossier = new LinkedHashMap<>();
+                dossier.put("address", addressStr);
+                
+                if (data != null) {
+                    dossier.put("type", data.getDataType().getName());
+                    dossier.put("length", data.getLength());
+                    dossier.put("value", data.getDefaultValueRepresentation());
+                } else {
+                    dossier.put("type", "undefined");
+                }
+
+                Symbol sym = program.getSymbolTable().getPrimarySymbol(addr);
+                if (sym != null) {
+                    dossier.put("name", sym.getName());
+                } else {
+                    dossier.put("name", "");
+                }
+
+                List<Map<String, Object>> xrefs = new ArrayList<>();
+                ghidra.program.model.symbol.ReferenceManager refManager = program.getReferenceManager();
+                ghidra.program.model.symbol.ReferenceIterator refIter = refManager.getReferencesTo(addr);
+                
+                Set<String> processedFuncs = new HashSet<>();
+                int funcCount = 0;
+
+                while (refIter.hasNext()) {
+                    ghidra.program.model.symbol.Reference ref = refIter.next();
+                    ghidra.program.model.listing.Function func = program.getFunctionManager().getFunctionContaining(ref.getFromAddress());
+                    
+                    Map<String, Object> refInfo = new HashMap<>();
+                    refInfo.put("from_address", ref.getFromAddress().toString());
+                    refInfo.put("type", ref.getReferenceType().toString());
+
+                    if (func != null) {
+                        refInfo.put("function_name", func.getName());
+                        String faddr = func.getEntryPoint().toString();
+                        
+                        if (processedFuncs.add(faddr) && ++funcCount <= 5) {
+                            try {
+                                String decompCode = eu.starsong.ghidra.util.GhidraUtil.decompileFunction(func, true, 30);
+                                refInfo.put("decompiled_code", decompCode != null ? decompCode : "// Decompilation failed");
+                            } catch (Exception e) {
+                                refInfo.put("decompiled_code", "// Decompilation failed");
+                            }
+                        }
+                    }
+                    xrefs.add(refInfo);
+                }
+                dossier.put("xrefs", xrefs);
+
+                eu.starsong.ghidra.api.ResponseBuilder builder = new eu.starsong.ghidra.api.ResponseBuilder(exchange, port).success(true).result(dossier);
+                builder.addLink("self", "/data/" + addressStr + "/dossier");
+                builder.addLink("program", "/program");
+                
+                sendJsonResponse(exchange, builder.build(), 200);
+            } catch (Exception e) {
+                Msg.error(this, "Error returning data dossier", e);
+                sendErrorResponse(exchange, 500, "Internal Server Error: " + e.getMessage(), "INTERNAL_ERROR");
+            }
+        }
+
+}

@@ -71,6 +71,7 @@ public class AutomationEndpoints extends AbstractEndpoint {
         features.put("variable_mutation_by_id", true);
         features.put("address_targeted_function_writes", true);
         features.put("run_batch", true);
+        features.put("dossier", true);
 
         List<String> batchOps = new ArrayList<>();
         batchOps.add("ensure_memory_block");
