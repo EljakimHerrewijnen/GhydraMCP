@@ -11,9 +11,11 @@ import ghidra.program.model.listing.Program;
 import ghidra.util.Msg;
 import ghidra.util.task.ConsoleTaskMonitor;
 
+import javax.swing.SwingUtilities;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Endpoints for project management operations (list projects, browse files, open files).
@@ -43,6 +45,7 @@ public class ProjectManagementEndpoints extends AbstractEndpoint {
         server.createContext("/project", this::handleCurrentProject);
         server.createContext("/project/files", this::handleListProjectFiles);
         server.createContext("/project/open", this::handleOpenFile);
+        server.createContext("/folders", this::handleFolders);
         server.createContext("/server/status", this::handleServerStatus);
         server.createContext("/server/version_control/sync", this::handleSyncFile);
         server.createContext("/server/version_control/sync-bulk", this::handleSyncBulk);
@@ -54,6 +57,84 @@ public class ProjectManagementEndpoints extends AbstractEndpoint {
         server.createContext("/server/version_control/file-status", this::handleFileStatus);
         server.createContext("/server/repository/files", this::handleRepositoryFiles);
         server.createContext("/server/version_history", this::handleVersionHistory);
+    }
+
+    /**
+     * Handle POST /folders - create a project folder (with any missing parents).
+     *
+     * Body params (JSON):
+     *   path (required) folder path to create, e.g. "/G980FXXS2ATD5"
+     */
+    private void handleFolders(HttpExchange exchange) throws IOException {
+        try {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+                return;
+            }
+
+            Map<String, String> params = parseJsonPostParams(exchange);
+            String path = params.get("path");
+            if (path == null || path.trim().isEmpty()) {
+                sendErrorResponse(exchange, 400, "Path parameter is required", "MISSING_PARAMETER");
+                return;
+            }
+            final String folderPath = path.trim();
+
+            final Project project = tool.getProject();
+            if (project == null) {
+                sendErrorResponse(exchange, 503, "No project is currently open", "NO_PROJECT_OPEN");
+                return;
+            }
+
+            final AtomicReference<DomainFolder> folderRef = new AtomicReference<>();
+            final AtomicReference<Exception> errRef = new AtomicReference<>();
+            Runnable task = () -> {
+                try {
+                    ProjectData projectData = project.getProjectData();
+                    DomainFolder folder = projectData.getRootFolder();
+                    for (String part : folderPath.split("/")) {
+                        if (part.isEmpty()) {
+                            continue;
+                        }
+                        DomainFolder next = folder.getFolder(part);
+                        if (next == null) {
+                            next = folder.createFolder(part);
+                        }
+                        folder = next;
+                    }
+                    folderRef.set(folder);
+                } catch (Exception e) {
+                    errRef.set(e);
+                }
+            };
+
+            if (SwingUtilities.isEventDispatchThread()) {
+                task.run();
+            } else {
+                SwingUtilities.invokeAndWait(task);
+            }
+
+            if (errRef.get() != null) {
+                Msg.error(this, "Error creating folder " + folderPath, errRef.get());
+                sendErrorResponse(exchange, 500, "Failed to create folder: " + errRef.get().getMessage(), "INTERNAL_ERROR");
+                return;
+            }
+
+            DomainFolder folder = folderRef.get();
+            Map<String, Object> result = new HashMap<>();
+            result.put("path", folder.getPathname());
+            result.put("name", folder.getName());
+
+            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                .success(true)
+                .result(result)
+                .addLink("self", "/folders")
+                .addLink("files", "/project/files?folder=" + folder.getPathname());
+            sendJsonResponse(exchange, builder.build(), 201);
+        } catch (Exception e) {
+            Msg.error(this, "Error in POST /folders", e);
+            sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage());
+        }
     }
 
     /**

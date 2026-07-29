@@ -21,6 +21,7 @@
     <ghidra.decompiler.jar>${project.basedir}/lib/Decompiler.jar</ghidra.decompiler.jar>
     <ghidra.utility.jar>${project.basedir}/lib/Utility.jar</ghidra.utility.jar>
     <ghidra.base.jar>${project.basedir}/lib/Base.jar</ghidra.base.jar>
+    <ghidra.db.jar>${project.basedir}/lib/DB.jar</ghidra.db.jar>
     <maven.deploy.skip>true</maven.deploy.skip>
     <maven.install.skip>true</maven.install.skip>
     <maven.build.timestamp.format>yyyyMMdd-HHmmss</maven.build.timestamp.format>
@@ -54,6 +55,13 @@
       <version>11.4.2</version>
       <scope>system</scope>
       <systemPath>${ghidra.softwaremodeling.jar}</systemPath>
+    </dependency>
+    <dependency>
+      <groupId>ghidra</groupId>
+      <artifactId>DB</artifactId>
+      <version>11.4.2</version>
+      <scope>system</scope>
+      <systemPath>${ghidra.db.jar}</systemPath>
     </dependency>
     <dependency>
       <groupId>ghidra</groupId>

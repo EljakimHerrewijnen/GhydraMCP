@@ -429,6 +429,21 @@ Represents the current binary loaded in Ghidra.
   }
   ```
 
+- **`GET /programs`**: List the program files in the current project (paginated).
+- **`POST /programs`**: Create a new, **empty** program in the project and (by default) open it as the current program. Useful for building up a synthetic memory map with `POST /memory/blocks` + memory writes, without importing a binary file. Request body:
+  ```json
+  {
+    "name": "rom_fwbl1",          // required — program/file name
+    "languageId": "AARCH64:LE:64:v8A", // optional — default "AARCH64:LE:64:v8A"
+    "folder": "/G980FXXS2ATD5",    // optional — default "/"; created if missing
+    "compilerSpecId": "default",   // optional — default = language default
+    "open": true                    // optional — open + make current (default true)
+  }
+  ```
+  Returns `201 Created` with `{ programId, name, path, languageId, compilerSpecId, open }`. Errors: `400 MISSING_PARAMETER` (no name), `400 UNKNOWN_LANGUAGE`, `409 ALREADY_EXISTS`, `503 NO_PROJECT_OPEN`.
+
+- **`POST /folders`**: Create a folder in the current project, creating any missing parents. Request body `{ "path": "/G980FXXS2ATD5" }`. Returns `201 Created` with `{ path, name }`.
+
 ### 3. Current Location
 
 Provides information about the current cursor position and function in Ghidra's CodeBrowser.

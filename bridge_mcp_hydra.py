@@ -3176,6 +3176,110 @@ def ensure_memory_block(name: str, address: str, size: int,
     response = safe_post(port, "memory/blocks/ensure", payload)
     return simplify_response(response)
 
+
+@mcp.tool()
+@text_output
+def create_folder(path: str, port: int = None) -> dict:
+    """Create a folder in the current Ghidra project (with any missing parents).
+
+    Args:
+        path: Project folder path to create, e.g. "/G980FXXS2ATD5"
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: {"path": <created folder path>, "name": <leaf name>}
+    """
+    if not path:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Path parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+    response = safe_post(port, "folders", {"path": path})
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def create_program(name: str, language_id: str = "AARCH64:LE:64:v8A",
+                   folder: str = "/", compiler_spec_id: str = None,
+                   open: bool = True, port: int = None) -> dict:
+    """Create a new, empty program in the current Ghidra project.
+
+    The created program is added to the project (folder is created if missing)
+    and, when ``open`` is true, opened and made the current program so that
+    subsequent ``ensure_memory_block`` / ``memory_write`` calls target it.
+
+    Args:
+        name: Program/file name, e.g. "rom_fwbl1"
+        language_id: Ghidra LanguageID (default "AARCH64:LE:64:v8A")
+        folder: Project folder path (default "/", created if missing)
+        compiler_spec_id: Compiler-spec id (optional; default = language default)
+        open: Open + make current after creation (default True)
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: Created program info (programId, path, languageId, ...)
+    """
+    if not name:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "Name parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+
+    payload = {
+        "name": name,
+        "languageId": language_id,
+        "folder": folder,
+        "open": str(open).lower(),
+    }
+    if compiler_spec_id:
+        payload["compilerSpecId"] = compiler_spec_id
+
+    response = safe_post(port, "programs", payload)
+    return simplify_response(response)
+
+
+@mcp.tool()
+@text_output
+def delete_program(program_id: str, port: int = None) -> dict:
+    """Delete a program from the current Ghidra project (closing it first if open).
+
+    Args:
+        program_id: Program id "Project:/path", e.g. "Simson:/S20/G980F/G980FXXS2ATD5/rom_fwbl1"
+        port: Specific Ghidra instance port (optional)
+
+    Returns:
+        dict: {"programId": ..., "path": ..., "deleted": true}
+    """
+    if not program_id:
+        return {
+            "success": False,
+            "error": {
+                "code": "MISSING_PARAMETER",
+                "message": "program_id parameter is required"
+            },
+            "timestamp": int(time.time() * 1000)
+        }
+
+    port = _get_instance_port(port)
+    # program_id contains a colon and slashes; encode for the path segment.
+    from urllib.parse import quote
+    response = safe_delete(port, f"programs/{quote(program_id, safe='')}")
+    return simplify_response(response)
+
+
 @mcp.tool()
 @text_output
 def memory_disassemble(address: str, limit: int = 50, offset: int = 0, port: int = None) -> dict:

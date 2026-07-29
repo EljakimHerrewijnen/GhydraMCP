@@ -11,11 +11,21 @@ import ghidra.app.services.ProgramManager;
 import ghidra.framework.model.DomainFile;
 import ghidra.framework.model.DomainFolder;
 import ghidra.framework.model.Project;
+import ghidra.framework.model.ProjectData;
 import ghidra.framework.plugintool.PluginTool;
+import ghidra.program.database.ProgramDB;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.lang.CompilerSpec;
+import ghidra.program.model.lang.CompilerSpecID;
+import ghidra.program.model.lang.Language;
+import ghidra.program.model.lang.LanguageID;
+import ghidra.program.model.lang.LanguageNotFoundException;
 import ghidra.program.model.listing.Program;
+import ghidra.program.util.DefaultLanguageService;
 import ghidra.util.Msg;
+import ghidra.util.task.TaskMonitor;
 
+import javax.swing.SwingUtilities;
 import java.io.IOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +33,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Endpoints for managing Ghidra programs (binaries).
@@ -45,13 +56,40 @@ public class ProgramEndpoints extends AbstractEndpoint {
     @Override
     public void registerEndpoints(HttpServer server) {
         server.createContext("/program", this::handleProgramInfo);
-        
+
+        // Program collection: GET lists programs, POST creates a new empty program.
+        server.createContext("/programs", this::handleProgramsCollection);
+
         // Register address and function endpoints
         server.createContext("/address", this::handleCurrentAddress);
         server.createContext("/function", this::handleCurrentFunction);
-        
+
         // Register direct analysis endpoints according to HATEOAS API
         server.createContext("/analysis/callgraph", this::handleCallGraph);
+    }
+
+    /**
+     * Dispatch the /programs context (registered as a prefix, so it also receives
+     * deeper /programs/{id}/... paths).
+     *   - exact /programs      : GET lists programs, POST creates one
+     *   - /programs/{id}/...    : delegate to the by-id / resource handler
+     */
+    private void handleProgramsCollection(HttpExchange exchange) throws IOException {
+        String path = exchange.getRequestURI().getPath();
+        if (!path.equals("/programs") && !path.equals("/programs/")) {
+            // Deeper path such as /programs/current/memory/{address}; route through
+            // the item handler which dispatches nested resources (memory, functions, ...).
+            handleProgramById(exchange);
+            return;
+        }
+        String method = exchange.getRequestMethod();
+        if ("GET".equals(method)) {
+            handleListPrograms(exchange);
+        } else if ("POST".equals(method)) {
+            handleCreateProgram(exchange);
+        } else {
+            sendErrorResponse(exchange, 405, "Method Not Allowed", "METHOD_NOT_ALLOWED");
+        }
     }
 
     @Override
@@ -141,12 +179,168 @@ public class ProgramEndpoints extends AbstractEndpoint {
     }
 
     /**
-     * Handle POST requests to import a new program
+     * Handle POST /programs - create a new, empty program in the project.
+     *
+     * Body params (JSON):
+     *   name           (required) program/file name, e.g. "rom_fwbl1"
+     *   languageId     (optional) Ghidra LanguageID, default "AARCH64:LE:64:v8A"
+     *   compilerSpecId (optional) compiler-spec id; default = language default
+     *   folder         (optional) project folder path, default "/" (created if missing)
+     *   open           (optional) open + make current after creation, default true
      */
-    private void handleImportProgram(HttpExchange exchange) throws IOException {
-        // This is a placeholder - actual implementation would use Ghidra's import API
-        // to import a binary file into the project
-        sendErrorResponse(exchange, 501, "Program import not implemented", "NOT_IMPLEMENTED");
+    private void handleCreateProgram(HttpExchange exchange) throws IOException {
+        try {
+            Map<String, String> params = parseJsonPostParams(exchange);
+            String name = params.get("name");
+            if (name == null || name.trim().isEmpty()) {
+                sendErrorResponse(exchange, 400, "Name parameter is required", "MISSING_PARAMETER");
+                return;
+            }
+            final String programName = name.trim();
+            final String languageId = params.getOrDefault("languageId", "AARCH64:LE:64:v8A");
+            final String compilerSpecId = params.get("compilerSpecId");
+            final String folderPath = params.getOrDefault("folder", "/");
+            final boolean openProgram = !"false".equalsIgnoreCase(params.getOrDefault("open", "true"));
+
+            final Project project = tool.getProject();
+            if (project == null) {
+                sendErrorResponse(exchange, 503, "No project is currently open", "NO_PROJECT_OPEN");
+                return;
+            }
+
+            // Resolve language.
+            final Language language;
+            try {
+                language = DefaultLanguageService.getLanguageService()
+                    .getLanguage(new LanguageID(languageId));
+            } catch (LanguageNotFoundException e) {
+                sendErrorResponse(exchange, 400, "Unknown languageId: " + languageId, "UNKNOWN_LANGUAGE");
+                return;
+            }
+
+            // Resolve compiler spec.
+            final CompilerSpec compilerSpec;
+            try {
+                if (compilerSpecId != null && !compilerSpecId.isEmpty()) {
+                    compilerSpec = language.getCompilerSpecByID(new CompilerSpecID(compilerSpecId));
+                } else {
+                    compilerSpec = language.getDefaultCompilerSpec();
+                }
+            } catch (Exception e) {
+                sendErrorResponse(exchange, 400, "Invalid compilerSpecId: " + compilerSpecId, "UNKNOWN_COMPILER_SPEC");
+                return;
+            }
+
+            final AtomicReference<DomainFile> fileRef = new AtomicReference<>();
+            final AtomicReference<Exception> errRef = new AtomicReference<>();
+
+            // Create the folder + empty program + save on the Swing thread.
+            runOnSwing(() -> {
+                Object consumer = new Object();
+                ProgramDB program = null;
+                try {
+                    DomainFolder folder = ensureFolder(project, folderPath);
+                    if (folder.getFile(programName) != null) {
+                        throw new IllegalStateException("ALREADY_EXISTS");
+                    }
+                    program = new ProgramDB(programName, language, compilerSpec, consumer);
+                    DomainFile df = folder.createFile(programName, program, TaskMonitor.DUMMY);
+                    fileRef.set(df);
+                } catch (Exception e) {
+                    errRef.set(e);
+                } finally {
+                    if (program != null) {
+                        program.release(consumer);
+                    }
+                }
+            });
+
+            if (errRef.get() != null) {
+                Exception e = errRef.get();
+                if ("ALREADY_EXISTS".equals(e.getMessage())) {
+                    sendErrorResponse(exchange, 409,
+                        "Program already exists: " + folderPath + "/" + programName, "ALREADY_EXISTS");
+                } else {
+                    Msg.error(this, "Error creating program", e);
+                    sendErrorResponse(exchange, 500, "Failed to create program: " + e.getMessage(), "INTERNAL_ERROR");
+                }
+                return;
+            }
+
+            final DomainFile df = fileRef.get();
+            boolean opened = false;
+            if (openProgram) {
+                ProgramManager pm = tool.getService(ProgramManager.class);
+                if (pm != null) {
+                    runOnSwing(() -> pm.openProgram(df));
+                    opened = true;
+                }
+            }
+
+            String programId = project.getName() + ":" + df.getPathname();
+            Map<String, Object> result = new HashMap<>();
+            result.put("programId", programId);
+            result.put("name", df.getName());
+            result.put("path", df.getPathname());
+            result.put("languageId", language.getLanguageID().getIdAsString());
+            result.put("compilerSpecId", compilerSpec.getCompilerSpecID().getIdAsString());
+            result.put("open", opened);
+
+            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                .success(true)
+                .result(result)
+                .addLink("self", "/programs/" + programId)
+                .addLink("memory", "/memory")
+                .addLink("segments", "/segments");
+            sendJsonResponse(exchange, builder.build(), 201);
+        } catch (Exception e) {
+            Msg.error(this, "Error in POST /programs", e);
+            sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR");
+        }
+    }
+
+    /**
+     * Ensure a project folder path exists, creating intermediate folders as needed.
+     * Must be called on the Swing thread (mutates project data).
+     */
+    private DomainFolder ensureFolder(Project project, String folderPath) throws Exception {
+        ProjectData projectData = project.getProjectData();
+        DomainFolder folder = projectData.getRootFolder();
+        if (folderPath == null || folderPath.trim().isEmpty()) {
+            return folder;
+        }
+        for (String part : folderPath.split("/")) {
+            if (part.isEmpty()) {
+                continue;
+            }
+            DomainFolder next = folder.getFolder(part);
+            if (next == null) {
+                next = folder.createFolder(part);
+            }
+            folder = next;
+        }
+        return folder;
+    }
+
+    /**
+     * Run a task on the Swing EDT, propagating any exception it records.
+     */
+    private void runOnSwing(Runnable task) throws Exception {
+        if (SwingUtilities.isEventDispatchThread()) {
+            task.run();
+            return;
+        }
+        final AtomicReference<RuntimeException> err = new AtomicReference<>();
+        SwingUtilities.invokeAndWait(() -> {
+            try {
+                task.run();
+            } catch (RuntimeException e) {
+                err.set(e);
+            }
+        });
+        if (err.get() != null) {
+            throw err.get();
+        }
     }
 
     /**
@@ -154,23 +348,30 @@ public class ProgramEndpoints extends AbstractEndpoint {
      */
     private void handleProgramById(HttpExchange exchange) throws IOException {
         try {
-            String path = exchange.getRequestURI().getPath();
-            
+            // Use the RAW path: a program id is "Project:/folder/name", so a
+            // client encodes its '/' as %2F. getPath() would decode those back to
+            // '/', making the nested-resource check below fire on the id itself
+            // and misrouting every GET/DELETE of a program that lives in a folder.
+            // getRawPath() keeps %2F encoded; only genuine resource separators are
+            // literal '/'.
+            String path = exchange.getRequestURI().getRawPath();
+
             // Check if this is a request for the current program
             if (path.equals("/programs/current")) {
                 handleProgramInfo(exchange);
                 return;
             }
-            
-            // Extract program ID from path
+
+            // Extract program ID from path (still percent-encoded)
             String programIdPath = path.substring("/programs/".length());
-            
-            // Handle nested resources
+
+            // Handle nested resources (a literal '/' separates id from resource;
+            // an encoded %2F inside the id does not count).
             if (programIdPath.contains("/")) {
                 handleProgramResource(exchange, programIdPath);
                 return;
             }
-            
+
             // Decode the program ID
             String programId = URLDecoder.decode(programIdPath, StandardCharsets.UTF_8);
             
@@ -260,9 +461,67 @@ public class ProgramEndpoints extends AbstractEndpoint {
      * Handle DELETE requests to close/remove a program
      */
     private void handleDeleteProgram(HttpExchange exchange, String programId) throws IOException {
-        // This is a placeholder - actual implementation would close the program
-        // and potentially remove it from the project
-        sendErrorResponse(exchange, 501, "Program deletion not implemented", "NOT_IMPLEMENTED");
+        try {
+            String[] parts = programId.split(":", 2);
+            if (parts.length != 2) {
+                sendErrorResponse(exchange, 400, "Invalid program ID format: " + programId, "INVALID_PROGRAM_ID");
+                return;
+            }
+            String projectName = parts[0];
+            String filePath = parts[1];
+
+            final Project project = tool.getProject();
+            if (project == null) {
+                sendErrorResponse(exchange, 503, "No project is currently open", "NO_PROJECT_OPEN");
+                return;
+            }
+            if (!projectName.equals(project.getName())) {
+                sendErrorResponse(exchange, 404, "Project not found: " + projectName, "PROJECT_NOT_FOUND");
+                return;
+            }
+
+            final DomainFile file = project.getProjectData().getFile(filePath);
+            if (file == null) {
+                sendErrorResponse(exchange, 404, "Program not found: " + filePath, "PROGRAM_NOT_FOUND");
+                return;
+            }
+
+            final AtomicReference<Exception> errRef = new AtomicReference<>();
+            runOnSwing(() -> {
+                try {
+                    // Close it first if it is open, then delete from the project.
+                    Program open = getOpenProgram(file);
+                    if (open != null) {
+                        ProgramManager pm = tool.getService(ProgramManager.class);
+                        if (pm != null) {
+                            pm.closeProgram(open, true);
+                        }
+                    }
+                    file.delete();
+                } catch (Exception e) {
+                    errRef.set(e);
+                }
+            });
+
+            if (errRef.get() != null) {
+                Msg.error(this, "Error deleting program " + filePath, errRef.get());
+                sendErrorResponse(exchange, 500, "Failed to delete program: " + errRef.get().getMessage(), "INTERNAL_ERROR");
+                return;
+            }
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("programId", programId);
+            result.put("path", filePath);
+            result.put("deleted", true);
+            ResponseBuilder builder = new ResponseBuilder(exchange, port)
+                .success(true)
+                .result(result)
+                .addLink("programs", "/programs");
+            sendJsonResponse(exchange, builder.build(), 200);
+        } catch (Exception e) {
+            Msg.error(this, "Error in DELETE /programs/" + programId, e);
+            sendErrorResponse(exchange, 500, "Internal server error: " + e.getMessage(), "INTERNAL_ERROR");
+        }
     }
 
     /**
